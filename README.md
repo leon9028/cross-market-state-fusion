@@ -184,6 +184,14 @@ pip install -r requirements.txt
 
 **Running on Ubuntu/EC2:** The RL strategy automatically uses PyTorch when MLX is not available. Train/save on Ubuntu produces `rl_model.pt` and `rl_model_stats.npz`; use `--load rl_model` to load. (Models saved on Mac with MLX use `.safetensors` and are not loadable on Linux without conversion.)
 
+**Low resource (e.g. <2GB RAM / small disk):**
+1. Install CPU-only PyTorch first (smaller download and disk use):  
+   `pip install torch --index-url https://download.pytorch.org/whl/cpu`  
+   Then run `pip install -r requirements.txt` (torch will already be satisfied).
+2. When running RL, reduce memory by setting env vars before the command:  
+   `export RL_BUFFER_SIZE=128 RL_BATCH_SIZE=32`  
+   then e.g. `python run.py rl --train --size 8`. Omit `--dashboard` if RAM is tight.
+
 ---
 
 ## Citation

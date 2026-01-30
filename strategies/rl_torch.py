@@ -5,6 +5,7 @@ PyTorch-based PPO (Proximal Policy Optimization) strategy.
 Same architecture and hyperparameters as rl_mlx.py, but runs on Linux/Ubuntu/EC2
 (CPU or CUDA). Use this when MLX is not available (Apple Silicon only).
 """
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -117,6 +118,12 @@ class RLStrategy(Strategy):
         target_kl: float = 0.02,
     ):
         super().__init__("rl")
+        # Low-memory override: set RL_BUFFER_SIZE and/or RL_BATCH_SIZE (e.g. 128, 32) when <2GB RAM
+        _buf = os.environ.get("RL_BUFFER_SIZE")
+        _bs = os.environ.get("RL_BATCH_SIZE")
+        buffer_size = int(_buf) if _buf else buffer_size
+        batch_size = int(_bs) if _bs else batch_size
+
         self.input_dim = input_dim
         self.hidden_size = hidden_size
         self.critic_hidden_size = critic_hidden_size

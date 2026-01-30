@@ -1,4 +1,5 @@
 # Core ML (MLX on Mac only; PyTorch for Linux/EC2)
+# On low-disk Linux, install CPU-only PyTorch first: pip install torch --index-url https://download.pytorch.org/whl/cpu
 mlx>=0.21.0 ; sys_platform == "darwin"
 torch>=2.0.0
 numpy>=1.24.0
