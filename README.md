@@ -168,23 +168,21 @@ python run.py --strategy random
 
 ## Requirements
 
-```
-mlx>=0.5.0
-websockets>=12.0
-flask>=3.0.0
-flask-socketio>=5.3.0
-numpy>=1.24.0
-requests>=2.31.0
+See `requirements.txt`. On **Apple Silicon (Mac)** the RL strategy uses MLX; on **Linux/Ubuntu/EC2** it uses PyTorch (no MLX). Install with:
+
+```bash
+pip install -r requirements.txt
 ```
 
 ## Installation
 
 ```bash
-cd experiments/03_polymarket
 python -m venv venv
-source venv/bin/activate
-pip install mlx websockets flask flask-socketio numpy requests
+source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r requirements.txt
 ```
+
+**Running on Ubuntu/EC2:** The RL strategy automatically uses PyTorch when MLX is not available. Train/save on Ubuntu produces `rl_model.pt` and `rl_model_stats.npz`; use `--load rl_model` to load. (Models saved on Mac with MLX use `.safetensors` and are not loadable on Linux without conversion.)
 
 ---
 

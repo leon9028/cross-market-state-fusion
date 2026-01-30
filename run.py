@@ -559,7 +559,7 @@ class TradingEngine:
             # Save RL model if training
             if isinstance(self.strategy, RLStrategy) and self.strategy.training:
                 self.strategy.save("rl_model")
-                print("  [RL] Model saved to rl_model.safetensors")
+                print("  [RL] Model saved to rl_model.pt / rl_model.safetensors (+ _stats.npz)")
 
 
 async def main():

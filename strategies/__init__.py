@@ -12,7 +12,10 @@ from .random_strat import RandomStrategy
 from .mean_revert import MeanRevertStrategy
 from .momentum import MomentumStrategy
 from .fade_spike import FadeSpikeStrategy
-from .rl_mlx import RLStrategy  # MLX-based PPO with proper autograd
+try:
+    from .rl_mlx import RLStrategy  # Apple Silicon (MLX)
+except ImportError:
+    from .rl_torch import RLStrategy  # Linux/Ubuntu/EC2 (PyTorch)
 from .gating import GatingStrategy
 
 
