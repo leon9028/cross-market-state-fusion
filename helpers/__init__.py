@@ -13,6 +13,11 @@ from .binance_wss import (
 from .orderbook_wss import (
     OrderbookStreamer,
 )
+from .position_wss import (
+    PositionStreamer,
+    FillData,
+    OrderEventData,
+)
 from .binance_futures import (
     FuturesStreamer,
     FuturesState,
@@ -35,6 +40,9 @@ __all__ = [
     "BinanceStreamer",
     "get_current_prices",
     "OrderbookStreamer",
+    "PositionStreamer",
+    "FillData",
+    "OrderEventData",
     "FuturesStreamer",
     "FuturesState",
     "get_futures_snapshot",
