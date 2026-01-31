@@ -21,7 +21,16 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 sys.path.insert(0, ".")
-from helpers import get_15m_markets, BinanceStreamer, OrderbookStreamer, Market, FuturesStreamer, get_logger
+from helpers import (
+    get_15m_markets,
+    BinanceStreamer,
+    OrderbookStreamer,
+    Market,
+    FuturesStreamer,
+    get_logger,
+    PositionStreamer,
+    FillData,
+)
 from strategies import (
     Strategy, MarketState, Action,
     create_strategy, AVAILABLE_STRATEGIES,
@@ -65,6 +74,8 @@ class TradingEngine:
         self.price_streamer = BinanceStreamer(["BTC", "ETH", "SOL", "XRP"])
         self.orderbook_streamer = OrderbookStreamer()
         self.futures_streamer = FuturesStreamer(["BTC", "ETH", "SOL", "XRP"])
+        self.position_streamer = PositionStreamer(condition_ids=[])
+        self.position_streamer.on_fill(self._on_fill)
 
         # State
         self.markets: Dict[str, Market] = {}
@@ -131,6 +142,8 @@ class TradingEngine:
             # Clear stale orderbook subscriptions
             active_cids = set(self.markets.keys())
             self.orderbook_streamer.clear_stale(active_cids)
+            # User Channel: subscribe to active markets for fill updates
+            self.position_streamer.set_condition_ids(list(self.markets.keys()))
 
     def execute_action(self, cid: str, action: Action, state: MarketState):
         """Execute paper trade with flexible sizing."""
@@ -229,6 +242,69 @@ class TradingEngine:
         # Only reward on position close - cleaner signal
         # Reward is set when trade closes in _execute_trade via self.pending_rewards
         return self.pending_rewards.pop(cid, 0.0)
+
+    def _resolve_condition_id(self, raw_cid: str) -> Optional[str]:
+        """Resolve fill condition_id to engine's position key (0x or no-0x)."""
+        if not raw_cid:
+            return None
+        if raw_cid in self.positions:
+            return raw_cid
+        if raw_cid.startswith("0x") and raw_cid[2:] in self.positions:
+            return raw_cid[2:]
+        if not raw_cid.startswith("0x") and f"0x{raw_cid}" in self.positions:
+            return f"0x{raw_cid}"
+        return None
+
+    def _on_fill(self, fill: FillData):
+        """Update positions from User Channel fill (status MATCHED)."""
+        cid = self._resolve_condition_id(fill.condition_id)
+        if not cid:
+            return
+        pos = self.positions.get(cid)
+        if not pos:
+            return
+        state = self.states.get(cid)
+        time_remaining = state.time_remaining if state else 0.0
+
+        if fill.side == "BUY":
+            if pos.size <= 0:
+                pos.side = fill.outcome
+                pos.entry_price = fill.price
+                pos.entry_time = datetime.now(timezone.utc)
+                pos.entry_prob = fill.price if fill.outcome == "UP" else (1.0 - fill.price)
+                pos.time_remaining_at_entry = time_remaining
+                pos.size = fill.size
+                print(f"    [FILL] OPEN {pos.asset} {fill.outcome} ${fill.size:.0f} @ {fill.price:.3f}")
+            else:
+                # Add to position (same side): VWAP
+                old_size = pos.size
+                pos.size += fill.size
+                pos.entry_price = (pos.entry_price * old_size + fill.price * fill.size) / pos.size
+                print(f"    [FILL] ADD {pos.asset} {fill.outcome} +${fill.size:.0f} @ {fill.price:.3f} -> size=${pos.size:.0f}")
+        else:
+            # SELL: close or reduce
+            if pos.size <= 0:
+                return
+            pos.size -= fill.size
+            if pos.size <= 0:
+                # Full or partial close: PnL on the amount sold
+                shares_sold = fill.size / pos.entry_price if pos.entry_price else 0
+                closed_side = pos.side
+                if closed_side == "UP":
+                    pnl = (fill.price - pos.entry_price) * shares_sold
+                else:
+                    pnl = ((1.0 - fill.price) - pos.entry_price) * shares_sold
+                pos.size = 0
+                pos.side = None
+                # _record_trade uses pos.size for emit/log; temporarily set to closed amount
+                closed_size = fill.size
+                pos.size = closed_size
+                self._record_trade(pos, fill.price, pnl, f"CLOSE {closed_side}", cid=cid)
+                pos.size = 0
+                self.pending_rewards[cid] = pnl
+                print(f"    [FILL] CLOSE {pos.asset} @ {fill.price:.3f} | PnL: ${pnl:+.2f}")
+            else:
+                print(f"    [FILL] REDUCE {pos.asset} {pos.side} -${fill.size:.0f} -> size=${pos.size:.0f}")
 
     def close_all_positions(self):
         """Close all positions at current prices."""
@@ -540,6 +616,7 @@ class TradingEngine:
             self.price_streamer.stream(),
             self.orderbook_streamer.stream(),
             self.futures_streamer.stream(),
+            self.position_streamer.stream(),
             self.decision_loop(),
         ]
 
@@ -553,6 +630,7 @@ class TradingEngine:
             self.price_streamer.stop()
             self.orderbook_streamer.stop()
             self.futures_streamer.stop()
+            self.position_streamer.stop()
             self.close_all_positions()
             self.print_final_stats()
 
