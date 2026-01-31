@@ -18,3 +18,7 @@ eventlet>=0.35.0
 
 # Utils
 python-dotenv>=1.0.0
+
+#
+# CLOB Client
+py-clob-client>=0.17.0
