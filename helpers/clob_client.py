@@ -61,6 +61,11 @@ def create_and_submit_order(
     size: float,
     order_type: OrderType = OrderType.FOK,
 ):
+    # Polymarket: maker amount max 2 decimals, taker amount max 4 decimals
+    price = round(float(price), 2)
+    size = int(float(size) * 10000) / 10000.0  # truncate to 4 decimals
+    if size <= 0 or price <= 0:
+        raise ValueError(f"Invalid order: price={price}, size={size}")
     order_args = OrderArgs(
         price=price,
         size=size,
