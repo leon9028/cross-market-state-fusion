@@ -3,7 +3,6 @@ from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
 from py_clob_client.constants import POLYGON
 from py_clob_client.order_builder.constants import BUY, SELL
 import os
-import sys
 from typing import Literal
 
 try:
@@ -73,16 +72,10 @@ def create_and_submit_order(
     # post_order may return requests.Response or a dict depending on client version
     if hasattr(resp, "status_code"):
         if resp.status_code != 200:
-            err_msg = getattr(resp, "text", resp) or getattr(resp, "content", b"").decode("utf-8", errors="replace")
-            print(f"Order failed: {err_msg}")
-            print(f"Order attempted: price={price}, size={size}")
-            sys.exit(1)
+            raise Exception(f"Failed to submit order: {getattr(resp, 'text', resp)}")
         return resp.json() if hasattr(resp, "json") and callable(resp.json) else resp
     if isinstance(resp, dict) and not resp.get("success", True):
-        err_msg = resp.get("errorMsg", resp)
-        print(f"Order failed: {err_msg}")
-        print(f"Order attempted: price={price}, size={size}")
-        sys.exit(1)
+        raise Exception(f"Failed to submit order: {resp.get('errorMsg', resp)}")
     return resp if isinstance(resp, dict) else {"success": True, "response": resp}
 
 

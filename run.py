@@ -178,6 +178,7 @@ class TradingEngine:
                 self._execute_live_order(cid, pos, action, state, price, trade_amount, size_label)
             except Exception as e:
                 print(f"    [LIVE] Order failed: {e}")
+                sys.exit(1)
             return
         # Paper: update positions in memory
         self._execute_paper_action(cid, pos, action, state, price, trade_amount, size_label)
@@ -207,7 +208,7 @@ class TradingEngine:
                 order_price = (ob_up.best_bid if ob_up and ob_up.best_bid is not None else price)
                 print(f"    [LIVE] SUBMIT CLOSE UP {pos.asset} {side} {shares_to_sell:.1f} @ {order_price:.3f}")
                 create_and_submit_order(
-                    self.clob_client, token_id, side, order_price, shares_to_sell, order_type=OrderType.FAK
+                    self.clob_client, token_id, side, order_price, shares_to_sell, order_type=OrderType.FOK
                 )
                 return
             # Strategy says BUY (buy UP) and we hold DOWN → close DOWN position by selling token_down
@@ -218,7 +219,7 @@ class TradingEngine:
                 order_price = (ob_down.best_bid if ob_down and ob_down.best_bid is not None else down_price)
                 print(f"    [LIVE] SUBMIT CLOSE DOWN {pos.asset} {side} {shares_to_sell:.1f} @ {order_price:.3f}")
                 create_and_submit_order(
-                    self.clob_client, token_id, side, order_price, shares_to_sell, order_type=OrderType.FAK
+                    self.clob_client, token_id, side, order_price, shares_to_sell, order_type=OrderType.FOK
                 )
                 return
 
@@ -239,6 +240,7 @@ class TradingEngine:
                 create_and_submit_order(
                     self.clob_client, token_id, side, order_price, size_shares, order_type=OrderType.FOK
                 )
+                return
             elif action.is_sell:
                 token_id = m.token_down
                 side = "BUY"
@@ -254,7 +256,7 @@ class TradingEngine:
                 create_and_submit_order(
                     self.clob_client, token_id, side, order_price, size_shares, order_type=OrderType.FOK
                 )
-
+                return
     def _execute_paper_action(
         self, cid: str, pos, action: Action, state: MarketState,
         price: float, trade_amount: float, size_label: str,
@@ -398,10 +400,8 @@ class TradingEngine:
             if pos.shares <= 0:
                 pos.shares = 0.0
                 closed_side = pos.side
-                if closed_side == "UP":
-                    pnl = (fill.price - pos.entry_price) * filled_shares
-                else:
-                    pnl = ((1.0 - fill.price) - pos.entry_price) * filled_shares
+                # User Channel fill.price is the outcome's execution price (UP or DOWN)
+                pnl = (fill.price - pos.entry_price) * filled_shares
                 pos.size = 0
                 pos.side = None
                 pos.size = filled_shares * fill.price  # for _record_trade emit
