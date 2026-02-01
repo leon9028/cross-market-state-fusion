@@ -57,11 +57,12 @@ class Position:
     """Track position for a market."""
     asset: str
     side: Optional[str] = None
-    size: float = 0.0
+    size: float = 0.0  # USD notional (paper) or for display; live close uses shares
     entry_price: float = 0.0
     entry_time: Optional[datetime] = None
     entry_prob: float = 0.0
     time_remaining_at_entry: float = 0.0
+    shares: float = 0.0  # Filled shares from User Channel (live); SELL order uses this
 
 
 class TradingEngine:
@@ -192,19 +193,21 @@ class TradingEngine:
         ob_up = self.orderbook_streamer.get_orderbook(cid, "UP")
         ob_down = self.orderbook_streamer.get_orderbook(cid, "DOWN")
 
-        # Close existing position: we hold tokens → sell them (SELL token_id, size in shares)
-        if pos.size > 0:
+        # Close existing position: SELL uses stored shares (from User Channel matched message)
+        if pos.size > 0 or pos.shares > 0:
+            # Use pos.shares (filled shares from User Channel); fallback to size/entry_price for paper/migration
+            shares_to_sell = pos.shares if pos.shares > 0 else (pos.size / pos.entry_price if pos.entry_price else 0)
+            shares_to_sell = float(int(shares_to_sell * 10) / 10)  # round down to 1 decimal (truncate)
+            if shares_to_sell <= 0:
+                return
             # Strategy says SELL (sell UP) and we hold UP → close UP position by selling token_up
             if action.is_sell and pos.side == "UP":
                 token_id = m.token_up
                 side = "SELL"
                 order_price = (ob_up.best_bid if ob_up and ob_up.best_bid is not None else price)
-                size = pos.size / pos.entry_price if pos.entry_price else 0  # shares for SELL
-                if size <= 0:
-                    return
-                print(f"    [LIVE] SUBMIT CLOSE UP {pos.asset} {side} {size:.2f} @ {order_price:.3f}")
+                print(f"    [LIVE] SUBMIT CLOSE UP {pos.asset} {side} {shares_to_sell:.1f} @ {order_price:.3f}")
                 create_and_submit_order(
-                    self.clob_client, token_id, side, order_price, size, order_type=OrderType.FAK
+                    self.clob_client, token_id, side, order_price, shares_to_sell, order_type=OrderType.FAK
                 )
                 return
             # Strategy says BUY (buy UP) and we hold DOWN → close DOWN position by selling token_down
@@ -213,12 +216,9 @@ class TradingEngine:
                 side = "SELL"
                 down_price = 1 - price
                 order_price = (ob_down.best_bid if ob_down and ob_down.best_bid is not None else down_price)
-                size = pos.size / pos.entry_price if pos.entry_price else 0
-                if size <= 0:
-                    return
-                print(f"    [LIVE] SUBMIT CLOSE DOWN {pos.asset} {side} {size:.2f} @ {order_price:.3f}")
+                print(f"    [LIVE] SUBMIT CLOSE DOWN {pos.asset} {side} {shares_to_sell:.1f} @ {order_price:.3f}")
                 create_and_submit_order(
-                    self.clob_client, token_id, side, order_price, size, order_type=OrderType.FAK
+                    self.clob_client, token_id, side, order_price, shares_to_sell, order_type=OrderType.FAK
                 )
                 return
 
@@ -344,7 +344,10 @@ class TradingEngine:
         return None
 
     def _on_fill(self, fill: FillData):
-        """Update positions from User Channel fill (status MATCHED)."""
+        """Update positions from User Channel fill (status MATCHED).
+        BUY order uses USD; User Channel matched message gives filled shares.
+        We store pos.shares = filled shares; SELL (close) uses pos.shares for order size.
+        """
         cid = self._resolve_condition_id(fill.condition_id)
         if not cid:
             return
@@ -355,53 +358,58 @@ class TradingEngine:
         time_remaining = state.time_remaining if state else 0.0
 
         if fill.side == "BUY":
-            if pos.size <= 0:
+            # fill.size = filled shares (tokens) from User Channel
+            filled_shares = fill.size
+            filled_usd = filled_shares * fill.price if fill.price and fill.price > 0 else 0.0
+            if pos.size <= 0 and pos.shares <= 0:
                 pos.side = fill.outcome
                 pos.entry_price = fill.price
                 pos.entry_time = datetime.now(timezone.utc)
                 pos.entry_prob = fill.price if fill.outcome == "UP" else (1.0 - fill.price)
                 pos.time_remaining_at_entry = time_remaining
-                pos.size = fill.size
-                print(f"    [FILL] OPEN {pos.asset} {fill.outcome} ${fill.size:.0f} @ {fill.price:.3f}")
+                pos.shares = filled_shares
+                pos.size = filled_usd
+                print(f"    [FILL] OPEN {pos.asset} {fill.outcome} {filled_shares:.4f} shares @ {fill.price:.3f} (${filled_usd:.0f})")
             else:
                 # Add to position (same side): VWAP
-                old_size = pos.size
-                pos.size += fill.size
-                pos.entry_price = (pos.entry_price * old_size + fill.price * fill.size) / pos.size
-                print(f"    [FILL] ADD {pos.asset} {fill.outcome} +${fill.size:.0f} @ {fill.price:.3f} -> size=${pos.size:.0f}")
+                old_shares = pos.shares
+                old_usd = pos.size
+                pos.shares += filled_shares
+                pos.size += filled_usd
+                pos.entry_price = pos.size / pos.shares if pos.shares > 0 else fill.price
+                print(f"    [FILL] ADD {pos.asset} {fill.outcome} +{filled_shares:.4f} shares @ {fill.price:.3f} -> {pos.shares:.4f} shares (${pos.size:.0f})")
         else:
-            # SELL: close or reduce
-            if pos.size <= 0:
+            # SELL: close or reduce (fill.size = filled shares)
+            if pos.shares <= 0 and pos.size <= 0:
                 return
-            pos.size -= fill.size
-            if pos.size <= 0:
-                # Full or partial close: PnL on the amount sold
-                shares_sold = fill.size / pos.entry_price if pos.entry_price else 0
+            filled_shares = fill.size
+            pos.shares -= filled_shares
+            if pos.shares <= 0:
+                pos.shares = 0.0
                 closed_side = pos.side
                 if closed_side == "UP":
-                    pnl = (fill.price - pos.entry_price) * shares_sold
+                    pnl = (fill.price - pos.entry_price) * filled_shares
                 else:
-                    pnl = ((1.0 - fill.price) - pos.entry_price) * shares_sold
+                    pnl = ((1.0 - fill.price) - pos.entry_price) * filled_shares
                 pos.size = 0
                 pos.side = None
-                # _record_trade uses pos.size for emit/log; temporarily set to closed amount
-                closed_size = fill.size
-                pos.size = closed_size
+                pos.size = filled_shares * fill.price  # for _record_trade emit
                 self._record_trade(pos, fill.price, pnl, f"CLOSE {closed_side}", cid=cid)
                 pos.size = 0
                 self.pending_rewards[cid] = pnl
-                print(f"    [FILL] CLOSE {pos.asset} @ {fill.price:.3f} | PnL: ${pnl:+.2f}")
+                print(f"    [FILL] CLOSE {pos.asset} {filled_shares:.4f} shares @ {fill.price:.3f} | PnL: ${pnl:+.2f}")
             else:
-                print(f"    [FILL] REDUCE {pos.asset} {pos.side} -${fill.size:.0f} -> size=${pos.size:.0f}")
+                pos.size = pos.shares * pos.entry_price  # keep USD in sync
+                print(f"    [FILL] REDUCE {pos.asset} {pos.side} -{filled_shares:.4f} shares -> {pos.shares:.4f} shares (${pos.size:.0f})")
 
     def close_all_positions(self):
-        """Close all positions at current prices."""
+        """Close all positions at current prices (in-memory only; live positions need SELL order)."""
         for cid, pos in self.positions.items():
-            if pos.size > 0:
+            if pos.size > 0 or pos.shares > 0:
                 state = self.states.get(cid)
                 if state:
                     price = state.prob
-                    shares = pos.size / pos.entry_price
+                    shares = pos.shares if pos.shares > 0 else (pos.size / pos.entry_price if pos.entry_price else 0)
                     if pos.side == "UP":
                         pnl = (price - pos.entry_price) * shares
                     else:
@@ -411,6 +419,7 @@ class TradingEngine:
                     self._record_trade(pos, price, pnl, f"FORCE CLOSE {pos.side}", cid=cid)
                     self.pending_rewards[cid] = pnl  # Pure realized PnL reward
                     pos.size = 0
+                    pos.shares = 0.0
                     pos.side = None
 
     async def decision_loop(self):
@@ -434,7 +443,7 @@ class TradingEngine:
                     pos = self.positions.get(cid)
                     if state and prev_state:
                         # Terminal reward is the realized PnL
-                        terminal_reward = state.position_pnl if pos and pos.size > 0 else 0.0
+                        terminal_reward = state.position_pnl if pos and (pos.size > 0 or pos.shares > 0) else 0.0
                         self.strategy.store(prev_state, Action.HOLD, terminal_reward, state, done=True)
 
                     # Clean up prev_state
@@ -520,10 +529,10 @@ class TradingEngine:
 
                 # Update position info in state
                 pos = self.positions.get(cid)
-                if pos and pos.size > 0:
+                if pos and (pos.size > 0 or pos.shares > 0):
                     state.has_position = True
                     state.position_side = pos.side
-                    shares = pos.size / pos.entry_price
+                    shares = pos.shares if pos.shares > 0 else (pos.size / pos.entry_price if pos.entry_price else 0)
                     if pos.side == "UP":
                         state.position_pnl = (state.prob - pos.entry_price) * shares
                     else:
@@ -536,7 +545,7 @@ class TradingEngine:
 
                 # For non-RL strategies, force close near expiry as safety
                 # For RL, let it learn to close on its own (gets penalty at expiry)
-                if pos and pos.size > 0 and state.very_near_expiry:
+                if pos and (pos.size > 0 or pos.shares > 0) and state.very_near_expiry:
                     if not isinstance(self.strategy, RLStrategy):
                         print(f"    ⏰ EARLY CLOSE: {pos.asset}")
                         close_action = Action.SELL if pos.side == "UP" else Action.BUY
@@ -653,7 +662,7 @@ class TradingEngine:
             pos = self.positions.get(cid)
             if state:
                 mins_left = (m.end_time - now).total_seconds() / 60
-                pos_str = f"{pos.side} ${pos.size:.0f}" if pos and pos.size > 0 else "FLAT"
+                pos_str = f"{pos.side} ${pos.size:.0f}" if pos and (pos.size > 0 or pos.shares > 0) else "FLAT"
                 vel = state._velocity()
                 print(f"  {m.asset}: prob={state.prob:.3f} vel={vel:+.3f} | {pos_str} | {mins_left:.1f}m")
 
