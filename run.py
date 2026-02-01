@@ -4,12 +4,13 @@ Unified runner for Polymarket trading strategies.
 
 Usage:
     python run.py                     # List available strategies
-    python run.py random              # Run random baseline
+    python run.py random              # Run random baseline (paper)
     python run.py mean_revert         # Run mean reversion
     python run.py rl                  # Run RL strategy
     python run.py gating              # Run gating (MoE)
     python run.py rl --train          # Train RL strategy
     python run.py rl --train --dashboard  # Train with web dashboard
+    python run.py rl --live       # Run with real orders (requires .env CLOB creds)
 """
 import asyncio
 import argparse
@@ -31,6 +32,8 @@ from helpers import (
     PositionStreamer,
     FillData,
 )
+from helpers.clob_client import make_client, create_and_submit_order
+from py_clob_client.clob_types import OrderType
 from strategies import (
     Strategy, MarketState, Action,
     create_strategy, AVAILABLE_STRATEGIES,
@@ -63,12 +66,22 @@ class Position:
 
 class TradingEngine:
     """
-    Paper trading engine with strategy harness.
+    Paper or live trading engine with strategy harness.
+    Use --live to place real orders via CLOB; positions then update from User Channel fills.
     """
 
-    def __init__(self, strategy: Strategy, trade_size: float = 10.0):
+    def __init__(self, strategy: Strategy, trade_size: float = 10.0, live: bool = False):
         self.strategy = strategy
         self.trade_size = trade_size
+        self.live = live
+        self.clob_client = None
+        if live:
+            try:
+                self.clob_client = make_client()
+                print("  [LIVE] CLOB client ready; orders will be sent to Polymarket.")
+            except Exception as e:
+                print(f"  [LIVE] CLOB client failed: {e}; falling back to paper trading.")
+                self.live = False
 
         # Streamers
         self.price_streamer = BinanceStreamer(["BTC", "ETH", "SOL", "XRP"])
@@ -146,7 +159,7 @@ class TradingEngine:
             self.position_streamer.set_condition_ids(list(self.markets.keys()))
 
     def execute_action(self, cid: str, action: Action, state: MarketState):
-        """Execute paper trade with flexible sizing."""
+        """Execute paper trade or live order (when --live and CLOB client ready)."""
         if action == Action.HOLD:
             return
 
@@ -156,32 +169,108 @@ class TradingEngine:
 
         price = state.prob
         trade_amount = self.trade_size * action.size_multiplier
+        size_label = {0.25: "SM", 0.5: "MD", 1.0: "LG"}.get(action.size_multiplier, "")
 
+        # Live: place real order via CLOB; position will update from _on_fill
+        if self.live and self.clob_client:
+            try:
+                self._execute_live_order(cid, pos, action, state, price, trade_amount, size_label)
+            except Exception as e:
+                print(f"    [LIVE] Order failed: {e}")
+            return
+        # Paper: update positions in memory
+        self._execute_paper_action(cid, pos, action, state, price, trade_amount, size_label)
+
+    def _execute_live_order(
+        self, cid: str, pos, action: Action, state: MarketState,
+        price: float, trade_amount: float, size_label: str,
+    ):
+        """Place real order via CLOB. Position updates come from User Channel (_on_fill)."""
+        m = self.markets.get(cid)
+        if not m:
+            return
+        ob_up = self.orderbook_streamer.get_orderbook(cid, "UP")
+        ob_down = self.orderbook_streamer.get_orderbook(cid, "DOWN")
+
+        # Close existing position: we hold tokens → sell them (SELL token_id, size in shares)
+        if pos.size > 0:
+            # Strategy says SELL (sell UP) and we hold UP → close UP position by selling token_up
+            if action.is_sell and pos.side == "UP":
+                token_id = m.token_up
+                side = "SELL"
+                order_price = (ob_up.best_bid if ob_up and ob_up.best_bid is not None else price)
+                size = pos.size / pos.entry_price if pos.entry_price else 0  # shares for SELL
+                if size <= 0:
+                    return
+                print(f"    [LIVE] SUBMIT CLOSE UP {pos.asset} {side} {size:.2f} @ {order_price:.3f}")
+                create_and_submit_order(
+                    self.clob_client, token_id, side, order_price, size, order_type=OrderType.FAK
+                )
+                return
+            # Strategy says BUY (buy UP) and we hold DOWN → close DOWN position by selling token_down
+            elif action.is_buy and pos.side == "DOWN":
+                token_id = m.token_down
+                side = "SELL"
+                down_price = 1 - price
+                order_price = (ob_down.best_bid if ob_down and ob_down.best_bid is not None else down_price)
+                size = pos.size / pos.entry_price if pos.entry_price else 0
+                if size <= 0:
+                    return
+                print(f"    [LIVE] SUBMIT CLOSE DOWN {pos.asset} {side} {size:.2f} @ {order_price:.3f}")
+                create_and_submit_order(
+                    self.clob_client, token_id, side, order_price, size, order_type=OrderType.FAK
+                )
+                return
+
+        # Open new position: we hold nothing → buy tokens (BUY token_id, size in dollars)
+        if pos.size == 0:
+            if action.is_buy:
+                token_id = m.token_up
+                side = "BUY"
+                order_price = (ob_up.best_ask if ob_up and ob_up.best_ask is not None else price)
+                size = trade_amount  # dollars for BUY (FOK)
+                print(f"    [LIVE] SUBMIT OPEN UP {pos.asset} ({size_label}) {side} ${size:.0f} @ {order_price:.3f}")
+                create_and_submit_order(
+                    self.clob_client, token_id, side, order_price, size, order_type=OrderType.FAK
+                )
+            elif action.is_sell:
+                token_id = m.token_down
+                side = "BUY"
+                down_price = 1 - price
+                order_price = (ob_down.best_ask if ob_down and ob_down.best_ask is not None else down_price)
+                size = trade_amount
+                print(f"    [LIVE] SUBMIT OPEN DOWN {pos.asset} ({size_label}) {side} ${size:.0f} @ {order_price:.3f}")
+                create_and_submit_order(
+                    self.clob_client, token_id, side, order_price, size, order_type=OrderType.FAK
+                )
+
+    def _execute_paper_action(
+        self, cid: str, pos, action: Action, state: MarketState,
+        price: float, trade_amount: float, size_label: str,
+    ):
+        """Execute paper trade (update positions in memory only)."""
         # Close existing position if switching sides
         if pos.size > 0:
             if action.is_sell and pos.side == "UP":
                 shares = pos.size / pos.entry_price
                 pnl = (price - pos.entry_price) * shares
                 self._record_trade(pos, price, pnl, "CLOSE UP", cid=cid)
-                self.pending_rewards[cid] = pnl  # Pure realized PnL reward
+                self.pending_rewards[cid] = pnl
                 pos.size = 0
                 pos.side = None
                 return
-
             elif action.is_buy and pos.side == "DOWN":
-                exit_down_price = 1 - price  # Current DOWN token price
+                exit_down_price = 1 - price
                 shares = pos.size / pos.entry_price
-                pnl = (exit_down_price - pos.entry_price) * shares  # DOWN token went up = profit
+                pnl = (exit_down_price - pos.entry_price) * shares
                 self._record_trade(pos, price, pnl, "CLOSE DOWN", cid=cid)
-                self.pending_rewards[cid] = pnl  # Pure realized PnL reward
+                self.pending_rewards[cid] = pnl
                 pos.size = 0
                 pos.side = None
                 return
 
         # Open new position
         if pos.size == 0:
-            size_label = {0.25: "SM", 0.5: "MD", 1.0: "LG"}.get(action.size_multiplier, "")
-
             if action.is_buy:
                 pos.side = "UP"
                 pos.size = trade_amount
@@ -191,13 +280,12 @@ class TradingEngine:
                 pos.time_remaining_at_entry = state.time_remaining
                 print(f"    OPEN {pos.asset} UP ({size_label}) ${trade_amount:.0f} @ {price:.3f}")
                 emit_trade(f"BUY_{size_label}", pos.asset, pos.size)
-
             elif action.is_sell:
                 pos.side = "DOWN"
                 pos.size = trade_amount
-                pos.entry_price = 1 - price  # DOWN token price = 1 - UP prob
+                pos.entry_price = 1 - price
                 pos.entry_time = datetime.now(timezone.utc)
-                pos.entry_prob = price  # Keep original UP prob for reference
+                pos.entry_prob = price
                 pos.time_remaining_at_entry = state.time_remaining
                 print(f"    OPEN {pos.asset} DOWN ({size_label}) ${trade_amount:.0f} @ {1 - price:.3f}")
                 emit_trade(f"SELL_{size_label}", pos.asset, pos.size)
@@ -653,6 +741,7 @@ async def main():
     parser.add_argument("--load", type=str, help="Load RL model from file")
     parser.add_argument("--dashboard", action="store_true", help="Enable web dashboard")
     parser.add_argument("--port", type=int, default=5050, help="Dashboard port")
+    parser.add_argument("--live", action="store_true", help="Place real orders via CLOB (requires .env: PK, FUNDER, CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE)")
 
     args = parser.parse_args()
 
@@ -663,6 +752,7 @@ async def main():
         print("\nUsage: python run.py <strategy>")
         print("       python run.py rl --train")
         print("       python run.py rl --train --dashboard")
+        print("       python run.py random --live   # real orders (requires .env CLOB creds)")
         return
 
     # Start dashboard in background if requested
@@ -694,7 +784,9 @@ async def main():
             strategy.eval()
 
     # Run
-    engine = TradingEngine(strategy, trade_size=args.size)
+    engine = TradingEngine(strategy, trade_size=args.size, live=args.live)
+    if args.live:
+        print("\n*** LIVE MODE: real orders will be sent to Polymarket ***\n")
     await engine.run()
 
 
