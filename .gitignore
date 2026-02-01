@@ -25,6 +25,11 @@ venv/
 ENV/
 .DS_Store
 
+# Trained RL model (keep locally / on EC2, do not commit)
+*.pt
+*.safetensors
+*.npz
+
 # Keep logs locally but don't push (large files)
 logs/trades_*.csv
 logs/episodes_*.csv
