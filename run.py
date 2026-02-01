@@ -206,7 +206,7 @@ class TradingEngine:
                 token_id = m.token_up
                 side = "SELL"
                 order_price = (ob_up.best_bid if ob_up and ob_up.best_bid is not None else price)
-                print(f"    [LIVE] SUBMIT CLOSE UP {pos.asset} {side} {shares_to_sell:.1f} @ {order_price:.3f}")
+                print(f"    [LIVE] SUBMIT CLOSE UP {pos.asset} {side} {shares_to_sell} @ {order_price}")
                 create_and_submit_order(
                     self.clob_client, token_id, side, order_price, shares_to_sell, order_type=OrderType.FOK
                 )
@@ -217,7 +217,7 @@ class TradingEngine:
                 side = "SELL"
                 down_price = 1 - price
                 order_price = (ob_down.best_bid if ob_down and ob_down.best_bid is not None else down_price)
-                print(f"    [LIVE] SUBMIT CLOSE DOWN {pos.asset} {side} {shares_to_sell:.1f} @ {order_price:.3f}")
+                print(f"    [LIVE] SUBMIT CLOSE DOWN {pos.asset} {side} {shares_to_sell} @ {order_price}")
                 create_and_submit_order(
                     self.clob_client, token_id, side, order_price, shares_to_sell, order_type=OrderType.FOK
                 )
@@ -236,7 +236,7 @@ class TradingEngine:
                 size_shares = float(int(size_shares * 10) / 10)  # 1 decimal, truncate
                 if size_shares < 1.0 / order_price:  # below min $1
                     return
-                print(f"    [LIVE] SUBMIT OPEN UP {pos.asset} ({size_label}) {side} {size_shares:.1f} shares @ {order_price:.3f} (${trade_amount:.0f})")
+                print(f"    [LIVE] SUBMIT OPEN UP {pos.asset} ({size_label}) {side} {size_shares} shares @ {order_price} (${trade_amount})")
                 create_and_submit_order(
                     self.clob_client, token_id, side, order_price, size_shares, order_type=OrderType.FOK
                 )
@@ -252,7 +252,7 @@ class TradingEngine:
                 size_shares = float(int(size_shares * 10) / 10)
                 if size_shares < 1.0 / order_price:
                     return
-                print(f"    [LIVE] SUBMIT OPEN DOWN {pos.asset} ({size_label}) {side} {size_shares:.1f} shares @ {order_price:.3f} (${trade_amount:.0f})")
+                print(f"    [LIVE] SUBMIT OPEN DOWN {pos.asset} ({size_label}) {side} {size_shares} shares @ {order_price} (${trade_amount})")
                 create_and_submit_order(
                     self.clob_client, token_id, side, order_price, size_shares, order_type=OrderType.FOK
                 )
