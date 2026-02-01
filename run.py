@@ -222,26 +222,37 @@ class TradingEngine:
                 )
                 return
 
-        # Open new position: we hold nothing → buy tokens (BUY token_id, size in dollars)
+        # Open new position: BUY token_id. API expects size in shares; notional = size * price >= $1.
         if pos.size == 0:
             if action.is_buy:
                 token_id = m.token_up
                 side = "BUY"
                 order_price = (ob_up.best_ask if ob_up and ob_up.best_ask is not None else price)
-                size = trade_amount  # dollars for BUY (FOK)
-                print(f"    [LIVE] SUBMIT OPEN UP {pos.asset} ({size_label}) {side} ${size:.0f} @ {order_price:.3f}")
+                if not order_price or order_price <= 0:
+                    return
+                # Size in shares so notional = trade_amount; min notional $1
+                size_shares = trade_amount / order_price
+                size_shares = float(int(size_shares * 10) / 10)  # 1 decimal, truncate
+                if size_shares < 1.0 / order_price:  # below min $1
+                    return
+                print(f"    [LIVE] SUBMIT OPEN UP {pos.asset} ({size_label}) {side} {size_shares:.1f} shares @ {order_price:.3f} (${trade_amount:.0f})")
                 create_and_submit_order(
-                    self.clob_client, token_id, side, order_price, size, order_type=OrderType.FAK
+                    self.clob_client, token_id, side, order_price, size_shares, order_type=OrderType.FAK
                 )
             elif action.is_sell:
                 token_id = m.token_down
                 side = "BUY"
                 down_price = 1 - price
                 order_price = (ob_down.best_ask if ob_down and ob_down.best_ask is not None else down_price)
-                size = trade_amount
-                print(f"    [LIVE] SUBMIT OPEN DOWN {pos.asset} ({size_label}) {side} ${size:.0f} @ {order_price:.3f}")
+                if not order_price or order_price <= 0:
+                    return
+                size_shares = trade_amount / order_price
+                size_shares = float(int(size_shares * 10) / 10)
+                if size_shares < 1.0 / order_price:
+                    return
+                print(f"    [LIVE] SUBMIT OPEN DOWN {pos.asset} ({size_label}) {side} {size_shares:.1f} shares @ {order_price:.3f} (${trade_amount:.0f})")
                 create_and_submit_order(
-                    self.clob_client, token_id, side, order_price, size, order_type=OrderType.FAK
+                    self.clob_client, token_id, side, order_price, size_shares, order_type=OrderType.FAK
                 )
 
     def _execute_paper_action(
