@@ -237,7 +237,7 @@ class TradingEngine:
                     return
                 print(f"    [LIVE] SUBMIT OPEN UP {pos.asset} ({size_label}) {side} {size_shares:.1f} shares @ {order_price:.3f} (${trade_amount:.0f})")
                 create_and_submit_order(
-                    self.clob_client, token_id, side, order_price, size_shares, order_type=OrderType.FAK
+                    self.clob_client, token_id, side, order_price, size_shares, order_type=OrderType.FOK
                 )
             elif action.is_sell:
                 token_id = m.token_down
@@ -252,7 +252,7 @@ class TradingEngine:
                     return
                 print(f"    [LIVE] SUBMIT OPEN DOWN {pos.asset} ({size_label}) {side} {size_shares:.1f} shares @ {order_price:.3f} (${trade_amount:.0f})")
                 create_and_submit_order(
-                    self.clob_client, token_id, side, order_price, size_shares, order_type=OrderType.FAK
+                    self.clob_client, token_id, side, order_price, size_shares, order_type=OrderType.FOK
                 )
 
     def _execute_paper_action(

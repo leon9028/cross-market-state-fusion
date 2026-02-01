@@ -3,6 +3,7 @@ from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
 from py_clob_client.constants import POLYGON
 from py_clob_client.order_builder.constants import BUY, SELL
 import os
+import sys
 from typing import Literal
 
 try:
@@ -61,11 +62,6 @@ def create_and_submit_order(
     size: float,
     order_type: OrderType = OrderType.FOK,
 ):
-    # Polymarket: maker amount max 2 decimals, taker amount max 4 decimals
-    price = round(float(price), 2)
-    size = int(float(size) * 10000) / 10000.0  # truncate to 4 decimals
-    if size <= 0 or price <= 0:
-        raise ValueError(f"Invalid order: price={price}, size={size}")
     order_args = OrderArgs(
         price=price,
         size=size,
@@ -77,10 +73,16 @@ def create_and_submit_order(
     # post_order may return requests.Response or a dict depending on client version
     if hasattr(resp, "status_code"):
         if resp.status_code != 200:
-            raise Exception(f"Failed to submit order: {getattr(resp, 'text', resp)}")
+            err_msg = getattr(resp, "text", resp) or getattr(resp, "content", b"").decode("utf-8", errors="replace")
+            print(f"Order failed: {err_msg}")
+            print(f"Order attempted: price={price}, size={size}")
+            sys.exit(1)
         return resp.json() if hasattr(resp, "json") and callable(resp.json) else resp
     if isinstance(resp, dict) and not resp.get("success", True):
-        raise Exception(f"Failed to submit order: {resp.get('errorMsg', resp)}")
+        err_msg = resp.get("errorMsg", resp)
+        print(f"Order failed: {err_msg}")
+        print(f"Order attempted: price={price}, size={size}")
+        sys.exit(1)
     return resp if isinstance(resp, dict) else {"success": True, "response": resp}
 
 
