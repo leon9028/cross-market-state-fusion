@@ -61,6 +61,12 @@ def create_and_submit_order(
     size: float,
     order_type: OrderType = OrderType.FOK,
 ):
+    # API: maker amount (price) max 2 decimals, taker amount (size) max 4 decimals
+    # price = round(float(price), 2)
+    # price = max(0.01, min(0.99, price))
+    # size = round(float(size), 4)
+    # size = max(0.0001, size)
+    print(f"    [CLOB] price: {price}, size: {size}")
     order_args = OrderArgs(
         price=price,
         size=size,

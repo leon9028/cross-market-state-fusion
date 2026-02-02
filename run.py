@@ -107,6 +107,10 @@ class TradingEngine:
         # Pending rewards for RL (set on position close)
         self.pending_rewards: Dict[str, float] = {}
 
+        # Live: track pending orders (token_id set) until fill received
+        # Prevents duplicate BUY/SELL orders for same token before fill arrives
+        self._pending_orders: set = set()  # Set of token_ids with pending orders
+
         # Logger (for RL training)
         self.logger = get_logger() if isinstance(strategy, RLStrategy) else None
 
@@ -177,8 +181,13 @@ class TradingEngine:
             try:
                 self._execute_live_order(cid, pos, action, state, price, trade_amount, size_label)
             except Exception as e:
-                print(f"    [LIVE] Order failed: {e}")
-                sys.exit(1)
+                # On order failure, clear pending order so we can retry
+                # Note: We don't know which token_id failed, so we'll clear all for this market
+                m = self.markets.get(cid)
+                if m:
+                    self._pending_orders.discard(m.token_up)
+                    self._pending_orders.discard(m.token_down)
+                    print(f"    [LIVE] Order failed: {e}")
             return
         # Paper: update positions in memory
         self._execute_paper_action(cid, pos, action, state, price, trade_amount, size_label)
@@ -205,22 +214,30 @@ class TradingEngine:
             if action.is_sell and pos.side == "UP":
                 token_id = m.token_up
                 side = "SELL"
+                if token_id in self._pending_orders:
+                    print(f"    [LIVE] SKIP: Pending order for {pos.asset} UP (close)")
+                    return
                 order_price = (ob_up.best_bid if ob_up and ob_up.best_bid is not None else price)
                 print(f"    [LIVE] SUBMIT CLOSE UP {pos.asset} {side} {shares_to_sell} @ {order_price}")
                 create_and_submit_order(
                     self.clob_client, token_id, side, order_price, shares_to_sell, order_type=OrderType.FOK
                 )
+                self._pending_orders.add(token_id)
                 return
             # Strategy says BUY (buy UP) and we hold DOWN → close DOWN position by selling token_down
             elif action.is_buy and pos.side == "DOWN":
                 token_id = m.token_down
                 side = "SELL"
+                if token_id in self._pending_orders:
+                    print(f"    [LIVE] SKIP: Pending order for {pos.asset} DOWN (close)")
+                    return
                 down_price = 1 - price
                 order_price = (ob_down.best_bid if ob_down and ob_down.best_bid is not None else down_price)
                 print(f"    [LIVE] SUBMIT CLOSE DOWN {pos.asset} {side} {shares_to_sell} @ {order_price}")
                 create_and_submit_order(
                     self.clob_client, token_id, side, order_price, shares_to_sell, order_type=OrderType.FOK
                 )
+                self._pending_orders.add(token_id)
                 return
 
         # Open new position: BUY token_id. API expects size in shares; notional = size * price >= $1.
@@ -228,34 +245,46 @@ class TradingEngine:
             if action.is_buy:
                 token_id = m.token_up
                 side = "BUY"
+                # Check if there's already a pending BUY order for this token
+                if token_id in self._pending_orders:
+                    print(f"    [LIVE] SKIP: Pending BUY order for {m.asset} UP (token {token_id[:16]}...)")
+                    return
                 order_price = (ob_up.best_ask if ob_up and ob_up.best_ask is not None else price)
                 if not order_price or order_price <= 0:
                     return
                 # Size in shares so notional = trade_amount; min notional $1
                 size_shares = trade_amount / order_price
-                size_shares = float(int(size_shares * 10) / 10)  # 1 decimal, truncate
+                size_shares = float(round(size_shares))  # round to integer
                 if size_shares < 1.0 / order_price:  # below min $1
                     return
                 print(f"    [LIVE] SUBMIT OPEN UP {pos.asset} ({size_label}) {side} {size_shares} shares @ {order_price} (${trade_amount})")
                 create_and_submit_order(
                     self.clob_client, token_id, side, order_price, size_shares, order_type=OrderType.FOK
                 )
+                # Track pending order
+                self._pending_orders.add(token_id)
                 return
             elif action.is_sell:
                 token_id = m.token_down
-                side = "BUY"
+                side = "BUY"  # Buying DOWN token
+                # Check if there's already a pending BUY order for this token
+                if token_id in self._pending_orders:
+                    print(f"    [LIVE] SKIP: Pending BUY order for {m.asset} DOWN (token {token_id[:16]}...)")
+                    return
                 down_price = 1 - price
                 order_price = (ob_down.best_ask if ob_down and ob_down.best_ask is not None else down_price)
                 if not order_price or order_price <= 0:
                     return
                 size_shares = trade_amount / order_price
-                size_shares = float(int(size_shares * 10) / 10)
+                size_shares = float(round(size_shares))  # round to integer
                 if size_shares < 1.0 / order_price:
                     return
                 print(f"    [LIVE] SUBMIT OPEN DOWN {pos.asset} ({size_label}) {side} {size_shares} shares @ {order_price} (${trade_amount})")
                 create_and_submit_order(
                     self.clob_client, token_id, side, order_price, size_shares, order_type=OrderType.FOK
                 )
+                # Track pending order
+                self._pending_orders.add(token_id)
                 return
     def _execute_paper_action(
         self, cid: str, pos, action: Action, state: MarketState,
@@ -369,6 +398,9 @@ class TradingEngine:
             return
         state = self.states.get(cid)
         time_remaining = state.time_remaining if state else 0.0
+
+        # Clear pending order when fill received (BUY or SELL)
+        self._pending_orders.discard(fill.asset_id)
 
         if fill.side == "BUY":
             # fill.size = filled shares (tokens) from User Channel
