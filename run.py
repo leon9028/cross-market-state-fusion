@@ -214,9 +214,9 @@ class TradingEngine:
                 if token_id in self._pending_orders:
                     return
                 order_price = (ob_up.best_bid if ob_up and ob_up.best_bid is not None else price)
-                print(f"    [LIVE] SUBMIT CLOSE UP {pos.asset} {side} {pos.shares * 0.99} @ {order_price}")
+                print(f"    [LIVE] SUBMIT CLOSE UP {pos.asset} {side} {pos.shares * 0.98} @ {order_price}")
                 create_and_submit_order(
-                    self.clob_client, token_id, side, order_price, pos.shares * 0.99, order_type=OrderType.FOK
+                    self.clob_client, token_id, side, order_price, pos.shares * 0.98, order_type=OrderType.FOK
                 )
                 self._pending_orders.add(token_id)
                 return
@@ -228,9 +228,9 @@ class TradingEngine:
                     return
                 down_price = 1 - price
                 order_price = (ob_down.best_bid if ob_down and ob_down.best_bid is not None else down_price)
-                print(f"    [LIVE] SUBMIT CLOSE DOWN {pos.asset} {side} {pos.shares * 0.99} @ {order_price}")
+                print(f"    [LIVE] SUBMIT CLOSE DOWN {pos.asset} {side} {pos.shares * 0.98} @ {order_price}")
                 create_and_submit_order(
-                    self.clob_client, token_id, side, order_price, pos.shares * 0.99, order_type=OrderType.FOK
+                    self.clob_client, token_id, side, order_price, pos.shares * 0.98, order_type=OrderType.FOK
                 )
                 self._pending_orders.add(token_id)
                 return
