@@ -415,50 +415,10 @@ class TradingEngine:
             pos.shares = 0
             print(f"    [FILL] CLOSE {pos.asset} {fill.outcome} {fill.size} shares @ {fill.price} | PnL: ${pnl:+.2f}")
 
-    def _submit_close_for_position(self, cid: str, pos) -> bool:
-        """Submit SELL to close one position (live only). Call before losing market info. Returns True if submitted."""
-        if not self.live or not self.clob_client:
-            return False
-        m = self.markets.get(cid)
-        if not m or not (pos.size > 0 or pos.shares > 0) or not pos.side:
-            return False
-        ob_up = self.orderbook_streamer.get_orderbook(cid, "UP")
-        ob_down = self.orderbook_streamer.get_orderbook(cid, "DOWN")
-        state = self.states.get(cid)
-        price_up = (ob_up.best_bid if ob_up and ob_up.best_bid is not None else (state.prob if state else 0.5))
-        price_down = (ob_down.best_bid if ob_down and ob_down.best_bid is not None else (1 - price_up if state else 0.5))
-        size = max(0.01, (pos.shares if pos.shares > 0 else (pos.size / pos.entry_price if pos.entry_price else 0)) * 0.98)
-        try:
-            if pos.side == "UP":
-                if m.token_up in self._pending_orders:
-                    return False
-                print(f"    [LIVE] SUBMIT CLOSE UP (expiry) {pos.asset} SELL {size} @ {price_up}")
-                create_and_submit_order(
-                    self.clob_client, m.token_up, "SELL", price_up, size, order_type=OrderType.FOK
-                )
-                self._pending_orders.add(m.token_up)
-            else:
-                if m.token_down in self._pending_orders:
-                    return False
-                print(f"    [LIVE] SUBMIT CLOSE DOWN (expiry) {pos.asset} SELL {size} @ {price_down}")
-                create_and_submit_order(
-                    self.clob_client, m.token_down, "SELL", price_down, size, order_type=OrderType.FOK
-                )
-                self._pending_orders.add(m.token_down)
-            return True
-        except Exception as e:
-            print(f"    [LIVE] Close on expiry failed for {pos.asset}: {e}")
-            self._pending_orders.discard(m.token_up)
-            self._pending_orders.discard(m.token_down)
-            return False
-
     def close_all_positions(self):
-        """Close all positions at current prices. Live: SELLs already sent on expiry; only zero in-memory for paper."""
+        """Close all positions at current prices (in-memory only; live positions need SELL order)."""
         for cid, pos in self.positions.items():
             if pos.size > 0 or pos.shares > 0:
-                # Live: we already submitted SELL in expire loop; leave pos non-zero so _on_fill can apply actual fill
-                if self.live and self.clob_client:
-                    continue
                 state = self.states.get(cid)
                 if state:
                     price = state.prob
@@ -488,16 +448,12 @@ class TradingEngine:
             expired = [cid for cid, m in self.markets.items() if m.end_time <= now]
             for cid in expired:
                 print(f"\n  EXPIRED: {self.markets[cid].asset}")
-                pos = self.positions.get(cid)
-
-                # Live: submit SELL to close position before we lose market (token ids)
-                if pos and (pos.size > 0 or pos.shares > 0):
-                    self._submit_close_for_position(cid, pos)
 
                 # RL: Store terminal experience with final PnL
                 if isinstance(self.strategy, RLStrategy) and self.strategy.training:
                     state = self.states.get(cid)
                     prev_state = self.prev_states.get(cid)
+                    pos = self.positions.get(cid)
                     if state and prev_state:
                         # Terminal reward is the realized PnL
                         terminal_reward = state.position_pnl if pos and (pos.size > 0 or pos.shares > 0) else 0.0
@@ -516,6 +472,10 @@ class TradingEngine:
                 if not self.markets:
                     print("No new markets. Waiting...")
                     await asyncio.sleep(30)
+                else:
+                    # Wait for User Channel to reconnect with new condition_ids before placing orders
+                    if self.live:
+                        await self.position_streamer.wait_connected(timeout=15)
                 continue
 
             # Update states and make decisions
@@ -766,11 +726,11 @@ class TradingEngine:
             print("No markets to trade!")
             return
 
-        # Start User Channel first; in live mode give it a moment to connect before decision_loop
+        # Start User Channel first; in live mode wait until connected before allowing orders
         position_task = asyncio.create_task(self.position_streamer.stream())
         if self.live:
-            await asyncio.sleep(3)
-            print("  [User] Starting decision loop and other streamers.")
+            await self.position_streamer.wait_connected(timeout=15)
+            print("  [User] User Channel ready; starting decision loop and other streamers.")
 
         tasks = [
             position_task,

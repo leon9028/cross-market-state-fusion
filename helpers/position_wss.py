@@ -80,6 +80,8 @@ class PositionStreamer:
         self._order_callbacks: List[Callable[[OrderEventData], None]] = []
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._auth: Optional[_AuthDict] = None
+        self._force_reconnect = False
+        self._connected_event: Optional[asyncio.Event] = None  # Set when loop is running
 
     def _ensure_auth(self) -> bool:
         """Build auth dict from env; return True if credentials present."""
@@ -98,9 +100,17 @@ class PositionStreamer:
         return True
 
     def set_condition_ids(self, condition_ids: List[str]):
-        """Update condition IDs to subscribe to (e.g. active markets). Applied on (re)connect."""
-        self.condition_ids = list(condition_ids)
-        self._pending_condition_ids = list(condition_ids)
+        """Update condition IDs to subscribe to (e.g. active markets). Triggers reconnect when already running."""
+        new_ids = list(condition_ids)
+        if set(new_ids) != set(self.condition_ids):
+            self.condition_ids = new_ids
+            self._pending_condition_ids = new_ids
+            self._force_reconnect = True
+            if self._connected_event is not None:
+                self._connected_event.clear()
+        else:
+            self.condition_ids = new_ids
+            self._pending_condition_ids = new_ids
 
     def add_condition_ids(self, condition_ids: List[str]):
         """Add condition IDs; no resubscribe on fly for user channel (reconnect to apply)."""
@@ -117,12 +127,22 @@ class PositionStreamer:
         """Register callback for order events (PLACEMENT / UPDATE / CANCELLATION)."""
         self._order_callbacks.append(callback)
 
+    async def wait_connected(self, timeout: Optional[float] = 15.0):
+        """Wait until User Channel is connected and subscribed. Used at startup and after rollover before placing orders."""
+        if self._connected_event is None:
+            return
+        try:
+            await asyncio.wait_for(self._connected_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            print("[Position WSS] wait_connected timed out")
+
     async def stream(self):
         """Connect to User Channel and process messages. Exits when stop() is called."""
         if not self._ensure_auth():
             print("[Position WSS] Missing CLOB_API_KEY / CLOB_SECRET / CLOB_PASS_PHRASE; skipping user channel")
             return
 
+        self._connected_event = asyncio.Event()
         self.running = True
         while self.running:
             try:
@@ -144,8 +164,15 @@ class PositionStreamer:
 
                     self._ws = ws
                     self._pending_condition_ids.clear()
+                    self._connected_event.set()
 
                     while self.running:
+                        if self._force_reconnect:
+                            print("  [User] Force reconnect triggered, closing connection...")
+                            self._force_reconnect = False
+                            self._connected_event.clear()
+                            break
+
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
                         except asyncio.TimeoutError:
@@ -166,8 +193,11 @@ class PositionStreamer:
                                     self._handle_message(item)
 
                     self._ws = None
+                    self._connected_event.clear()
 
             except Exception as e:
+                if self._connected_event is not None:
+                    self._connected_event.clear()
                 print(f"[Position WSS] Error: {e}, reconnecting...")
                 await asyncio.sleep(2)
 
