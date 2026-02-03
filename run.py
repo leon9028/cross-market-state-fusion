@@ -85,11 +85,12 @@ class TradingEngine:
                 self.live = False
 
         # Streamers
-        self.price_streamer = BinanceStreamer(["BTC", "ETH", "SOL", "XRP"])
-        self.orderbook_streamer = OrderbookStreamer()
-        self.futures_streamer = FuturesStreamer(["BTC", "ETH", "SOL", "XRP"])
         self.position_streamer = PositionStreamer(condition_ids=[])
         self.position_streamer.on_fill(self._on_fill)
+        self.price_streamer = BinanceStreamer(["BTC"])
+        self.orderbook_streamer = OrderbookStreamer()
+        self.futures_streamer = FuturesStreamer(["BTC"])
+
 
         # State
         self.markets: Dict[str, Market] = {}
@@ -120,7 +121,7 @@ class TradingEngine:
         print(f"STRATEGY: {self.strategy.name.upper()}")
         print("=" * 60)
 
-        markets = get_15m_markets(assets=["BTC", "ETH", "SOL", "XRP"])
+        markets = get_15m_markets(assets=["BTC"])
         now = datetime.now(timezone.utc)
 
         # Clear stale data
@@ -206,21 +207,16 @@ class TradingEngine:
         # Close existing position: SELL uses stored shares (from User Channel matched message)
         if pos.size > 0 or pos.shares > 0:
             # Use pos.shares (filled shares from User Channel); fallback to size/entry_price for paper/migration
-            shares_to_sell = pos.shares if pos.shares > 0 else (pos.size / pos.entry_price if pos.entry_price else 0)
-            shares_to_sell = float(int(shares_to_sell * 10) / 10)  # round down to 1 decimal (truncate)
-            if shares_to_sell <= 0:
-                return
             # Strategy says SELL (sell UP) and we hold UP → close UP position by selling token_up
             if action.is_sell and pos.side == "UP":
                 token_id = m.token_up
                 side = "SELL"
                 if token_id in self._pending_orders:
-                    print(f"    [LIVE] SKIP: Pending order for {pos.asset} UP (close)")
                     return
                 order_price = (ob_up.best_bid if ob_up and ob_up.best_bid is not None else price)
-                print(f"    [LIVE] SUBMIT CLOSE UP {pos.asset} {side} {shares_to_sell} @ {order_price}")
+                print(f"    [LIVE] SUBMIT CLOSE UP {pos.asset} {side} {pos.shares * 0.96} @ {order_price}")
                 create_and_submit_order(
-                    self.clob_client, token_id, side, order_price, shares_to_sell, order_type=OrderType.FOK
+                    self.clob_client, token_id, side, order_price, pos.shares * 0.96, order_type=OrderType.FOK
                 )
                 self._pending_orders.add(token_id)
                 return
@@ -229,13 +225,12 @@ class TradingEngine:
                 token_id = m.token_down
                 side = "SELL"
                 if token_id in self._pending_orders:
-                    print(f"    [LIVE] SKIP: Pending order for {pos.asset} DOWN (close)")
                     return
                 down_price = 1 - price
                 order_price = (ob_down.best_bid if ob_down and ob_down.best_bid is not None else down_price)
-                print(f"    [LIVE] SUBMIT CLOSE DOWN {pos.asset} {side} {shares_to_sell} @ {order_price}")
+                print(f"    [LIVE] SUBMIT CLOSE DOWN {pos.asset} {side} {pos.shares * 0.96} @ {order_price}")
                 create_and_submit_order(
-                    self.clob_client, token_id, side, order_price, shares_to_sell, order_type=OrderType.FOK
+                    self.clob_client, token_id, side, order_price, pos.shares * 0.96, order_type=OrderType.FOK
                 )
                 self._pending_orders.add(token_id)
                 return
@@ -247,7 +242,6 @@ class TradingEngine:
                 side = "BUY"
                 # Check if there's already a pending BUY order for this token
                 if token_id in self._pending_orders:
-                    print(f"    [LIVE] SKIP: Pending BUY order for {m.asset} UP (token {token_id[:16]}...)")
                     return
                 order_price = (ob_up.best_ask if ob_up and ob_up.best_ask is not None else price)
                 if not order_price or order_price <= 0:
@@ -269,7 +263,6 @@ class TradingEngine:
                 side = "BUY"  # Buying DOWN token
                 # Check if there's already a pending BUY order for this token
                 if token_id in self._pending_orders:
-                    print(f"    [LIVE] SKIP: Pending BUY order for {m.asset} DOWN (token {token_id[:16]}...)")
                     return
                 down_price = 1 - price
                 order_price = (ob_down.best_ask if ob_down and ob_down.best_ask is not None else down_price)
@@ -391,8 +384,6 @@ class TradingEngine:
         We store pos.shares = filled shares; SELL (close) uses pos.shares for order size.
         """
         cid = self._resolve_condition_id(fill.condition_id)
-        if not cid:
-            return
         pos = self.positions.get(cid)
         if not pos:
             return
@@ -404,46 +395,25 @@ class TradingEngine:
 
         if fill.side == "BUY":
             # fill.size = filled shares (tokens) from User Channel
-            filled_shares = fill.size
-            filled_usd = filled_shares * fill.price if fill.price and fill.price > 0 else 0.0
-            if pos.size <= 0 and pos.shares <= 0:
-                pos.side = fill.outcome
-                pos.entry_price = fill.price
-                pos.entry_time = datetime.now(timezone.utc)
-                pos.entry_prob = fill.price if fill.outcome == "UP" else (1.0 - fill.price)
-                pos.time_remaining_at_entry = time_remaining
-                pos.shares = filled_shares
-                pos.size = filled_usd
-                print(f"    [FILL] OPEN {pos.asset} {fill.outcome} {filled_shares:.4f} shares @ {fill.price:.3f} (${filled_usd:.0f})")
-            else:
-                # Add to position (same side): VWAP
-                old_shares = pos.shares
-                old_usd = pos.size
-                pos.shares += filled_shares
-                pos.size += filled_usd
-                pos.entry_price = pos.size / pos.shares if pos.shares > 0 else fill.price
-                print(f"    [FILL] ADD {pos.asset} {fill.outcome} +{filled_shares:.4f} shares @ {fill.price:.3f} -> {pos.shares:.4f} shares (${pos.size:.0f})")
+            pos.shares = fill.size
+            pos.size = fill.size * fill.price
+            pos.side = fill.outcome
+            pos.entry_price = fill.price
+            pos.entry_time = datetime.now(timezone.utc)
+            pos.entry_prob = fill.price
+            pos.time_remaining_at_entry = time_remaining
+            print(f"    [FILL] OPEN {pos.asset} {pos.side} {pos.shares} shares @ {fill.price} (${pos.size})")
         else:
-            # SELL: close or reduce (fill.size = filled shares)
             if pos.shares <= 0 and pos.size <= 0:
                 return
-            filled_shares = fill.size
-            pos.shares -= filled_shares
-            if pos.shares <= 0:
-                pos.shares = 0.0
-                closed_side = pos.side
-                # User Channel fill.price is the outcome's execution price (UP or DOWN)
-                pnl = (fill.price - pos.entry_price) * filled_shares
-                pos.size = 0
-                pos.side = None
-                pos.size = filled_shares * fill.price  # for _record_trade emit
-                self._record_trade(pos, fill.price, pnl, f"CLOSE {closed_side}", cid=cid)
-                pos.size = 0
-                self.pending_rewards[cid] = pnl
-                print(f"    [FILL] CLOSE {pos.asset} {filled_shares:.4f} shares @ {fill.price:.3f} | PnL: ${pnl:+.2f}")
-            else:
-                pos.size = pos.shares * pos.entry_price  # keep USD in sync
-                print(f"    [FILL] REDUCE {pos.asset} {pos.side} -{filled_shares:.4f} shares -> {pos.shares:.4f} shares (${pos.size:.0f})")
+            close_side = fill.outcome
+            pnl = (fill.price - pos.entry_price) * fill.size
+            self._record_trade(pos, fill.price, pnl, f"CLOSE {close_side}", cid=cid)
+            self.pending_rewards[cid] = pnl
+            pos.size = 0
+            pos.side = None
+            pos.shares = 0
+            print(f"    [FILL] CLOSE {pos.asset} {fill.outcome} {fill.size} shares @ {fill.price} | PnL: ${pnl:+.2f}")
 
     def close_all_positions(self):
         """Close all positions at current prices (in-memory only; live positions need SELL order)."""
@@ -752,11 +722,17 @@ class TradingEngine:
             print("No markets to trade!")
             return
 
+        # Start User Channel first; in live mode give it a moment to connect before decision_loop
+        position_task = asyncio.create_task(self.position_streamer.stream())
+        if self.live:
+            await asyncio.sleep(3)
+            print("  [User] Starting decision loop and other streamers.")
+
         tasks = [
+            position_task,
             self.price_streamer.stream(),
             self.orderbook_streamer.stream(),
             self.futures_streamer.stream(),
-            self.position_streamer.stream(),
             self.decision_loop(),
         ]
 

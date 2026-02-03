@@ -66,7 +66,6 @@ def create_and_submit_order(
     # price = max(0.01, min(0.99, price))
     # size = round(float(size), 4)
     # size = max(0.0001, size)
-    print(f"    [CLOB] price: {price}, size: {size}")
     order_args = OrderArgs(
         price=price,
         size=size,
