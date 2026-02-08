@@ -132,7 +132,7 @@ class OrderbookStreamer:
 
                     # Also include any pending subs
                     if self._pending_subs:
-                        token_ids.extend(self._pending_subs)
+                        # token_ids.extend(self._pending_subs)
                         self._pending_subs.clear()
 
                     if token_ids:
@@ -142,7 +142,7 @@ class OrderbookStreamer:
                             "type": "market"
                         }
                         await ws.send(json.dumps(sub_msg))
-                        print(f"  Subscribed to {len(token_ids)} orderbooks")
+                        print(f"  [OB] Subscribed to {len(token_ids)} orderbooks")
 
                     self._ws = ws
 

@@ -73,15 +73,15 @@ class PositionStreamer:
     """
 
     def __init__(self, condition_ids: Optional[List[str]] = None):
-        self.condition_ids: List[str] = list(condition_ids or [])
-        self._pending_condition_ids: List[str] = []
-        self.running = False
+        self.cids: List[str] = list(condition_ids or []) # List of condition IDs to subscribe to
+        self._pending_cids: List[str] = [] # New condition IDs to subscribe to (queued)
+        self.running = False # Flag to indicate if the streamer is running
         self._fill_callbacks: List[Callable[[FillData], None]] = []
-        self._order_callbacks: List[Callable[[OrderEventData], None]] = []
-        self._ws: Optional[websockets.WebSocketClientProtocol] = None
-        self._auth: Optional[_AuthDict] = None
-        self._force_reconnect = False
-        self._connected_event: Optional[asyncio.Event] = None  # Set when loop is running
+        self._order_callbacks: List[Callable[[OrderEventData], None]] = [] # List of callbacks for order events
+        self._ws: Optional[websockets.WebSocketClientProtocol] = None # WebSocket client
+        self._auth: Optional[_AuthDict] = None # Authentication dictionary
+        self._force_reconnect = False # Flag to trigger reconnection
+        self._connected_event: Optional[asyncio.Event] = None # Event to signal when the streamer is connected
 
     def _ensure_auth(self) -> bool:
         """Build auth dict from env; return True if credentials present."""
@@ -99,25 +99,27 @@ class PositionStreamer:
         }
         return True
 
-    def set_condition_ids(self, condition_ids: List[str]):
-        """Update condition IDs to subscribe to (e.g. active markets). Triggers reconnect when already running."""
-        new_ids = list(condition_ids)
-        if set(new_ids) != set(self.condition_ids):
-            self.condition_ids = new_ids
-            self._pending_condition_ids = new_ids
-            self._force_reconnect = True
-            if self._connected_event is not None:
-                self._connected_event.clear()
-        else:
-            self.condition_ids = new_ids
-            self._pending_condition_ids = new_ids
+    def clear_stale(self, active_condition_ids: set):
+        """Remove condition IDs for expired markets and trigger reconnection."""
+        stale_keys = [k for k in self.cids
+                    if k not in active_condition_ids]
 
-    def add_condition_ids(self, condition_ids: List[str]):
-        """Add condition IDs; no resubscribe on fly for user channel (reconnect to apply)."""
-        for cid in condition_ids:
-            if cid not in self.condition_ids:
-                self.condition_ids.append(cid)
-                self._pending_condition_ids.append(cid)
+        had_stale = len(stale_keys) > 0
+        for cid in stale_keys:
+            self.cids.remove(cid)
+
+        # If we removed subscriptions, force reconnect to cleanly re-subscribe
+        # This fixes the issue where User Channel gets stuck on stale condition IDs
+        if had_stale:
+            print(f"  [User] Cleared {len(stale_keys)} stale condition IDs, triggering reconnect")
+            self._force_reconnect = True
+
+    def subscribe(self, condition_id: str):
+        """Subscribe to a condition ID."""
+        if condition_id not in self.cids:
+            self.cids.append(condition_id)
+            self._pending_cids.append(condition_id)
+            print(f"  [User] Queued {condition_id[:8]}... (pending: {len(self._pending_cids)})")
 
     def on_fill(self, callback: Callable[[FillData], None]):
         """Register callback for trade fills (event_type trade, status MATCHED)."""
@@ -145,61 +147,74 @@ class PositionStreamer:
         self._connected_event = asyncio.Event()
         self.running = True
         while self.running:
+            # Wait for subscriptions if none exist yet
+            if not self.cids and not self._pending_cids:
+                await asyncio.sleep(0.5)
+                continue
+
             try:
                 async with websockets.connect(USER_CHANNEL_WSS) as ws:
                     print("✓ Connected to Polymarket User Channel (position/order stream)")
 
-                    # Subscribe with auth; empty markets = all user activity
-                    markets = list(self.condition_ids) if self.condition_ids else []
-                    msg = {
-                        "markets": markets,
-                        "type": "user",
-                        "auth": self._auth,
-                    }
-                    await ws.send(json.dumps(msg))
-                    if markets:
-                        print(f"  [User] Subscribed to {len(markets)} condition(s)")
-                    else:
-                        print("  [User] Subscribed to all user activity")
+                    # Collect all condition IDs for initial subscription
+                    cids = self.cids.copy()
+
+                    # Also include any pending cids
+                    if self._pending_cids:
+                        # cids.extend(self._pending_cids)
+                        self._pending_cids.clear()
+
+                    if cids:
+                        # Send single subscription with all condition IDs
+                        cids_msg = {
+                            "markets": cids,
+                            "type": "user",
+                            "auth": self._auth,
+                        }
+                        await ws.send(json.dumps(cids_msg))
+                        print(f"  [User] Subscribed to {len(cids)} markets")
 
                     self._ws = ws
-                    self._pending_condition_ids.clear()
                     self._connected_event.set()
 
+                    # Listen for updates
                     while self.running:
-                        if self._force_reconnect:
-                            print("  [User] Force reconnect triggered, closing connection...")
-                            self._force_reconnect = False
-                            self._connected_event.clear()
-                            break
-
                         try:
-                            raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                            if self._force_reconnect:
+                                print("  [User] Force reconnect triggered, closing connection...")
+                                self._force_reconnect = False
+                                self._connected_event.clear()
+                                break
+
+                            if self._pending_cids:
+                                new_cids = self._pending_cids.copy()
+                                self._pending_cids.clear()
+                                cids_msg = {
+                                    "markets": new_cids,
+                                    "type": "user",
+                                    "auth": self._auth,
+                                }
+                                await ws.send(json.dumps(cids_msg))
+                                print(f"  [User] Sent subscription for {len(new_cids)} new markets")
+
+                            # Short timeout to check pending cids frequently
+                            msg = await asyncio.wait_for(ws.recv(), timeout=0.1)
+                            data = json.loads(msg)
+
+                            # Handle different message types
+                            if isinstance(data, dict):
+                                self._handle_message(data)
                         except asyncio.TimeoutError:
-                            # Ping to keep connection alive
-                            await ws.ping()
-                            continue
-
-                        try:
-                            data = json.loads(raw)
+                            pass
                         except json.JSONDecodeError:
-                            continue
-
-                        if isinstance(data, dict):
-                            self._handle_message(data)
-                        elif isinstance(data, list):
-                            for item in data:
-                                if isinstance(item, dict):
-                                    self._handle_message(item)
+                            pass
 
                     self._ws = None
                     self._connected_event.clear()
 
             except Exception as e:
-                if self._connected_event is not None:
-                    self._connected_event.clear()
-                print(f"[Position WSS] Error: {e}, reconnecting...")
-                await asyncio.sleep(2)
+                print(f"CLOB WSS error: {e}, reconnecting...")
+                await asyncio.sleep(1)
 
     def _handle_message(self, data: dict):
         """Dispatch trade vs order messages to callbacks."""

@@ -137,7 +137,9 @@ class TradingEngine:
             print(f"  UP: {m.price_up:.3f} | DOWN: {m.price_down:.3f}")
 
             self.markets[m.condition_id] = m
+            # Subscribe to orderbook and position streamers
             self.orderbook_streamer.subscribe(m.condition_id, m.token_up, m.token_down)
+            self.position_streamer.subscribe(m.condition_id)
 
             # Init state
             self.states[m.condition_id] = MarketState(
@@ -161,8 +163,7 @@ class TradingEngine:
             # Clear stale orderbook subscriptions
             active_cids = set(self.markets.keys())
             self.orderbook_streamer.clear_stale(active_cids)
-            # User Channel: subscribe to active markets for fill updates
-            self.position_streamer.set_condition_ids(list(self.markets.keys()))
+            self.position_streamer.clear_stale(active_cids)
 
     def execute_action(self, cid: str, action: Action, state: MarketState):
         """Execute paper trade or live order (when --live and CLOB client ready)."""
@@ -728,9 +729,8 @@ class TradingEngine:
 
         # Start User Channel first; in live mode wait until connected before allowing orders
         position_task = asyncio.create_task(self.position_streamer.stream())
-        if self.live:
-            await self.position_streamer.wait_connected(timeout=15)
-            print("  [User] User Channel ready; starting decision loop and other streamers.")
+        await self.position_streamer.wait_connected(timeout=15)
+        print("  [User] User Channel ready; starting decision loop and other streamers.")
 
         tasks = [
             position_task,
