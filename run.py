@@ -17,7 +17,7 @@ import argparse
 import copy
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -87,9 +87,9 @@ class TradingEngine:
         # Streamers
         self.position_streamer = PositionStreamer(condition_ids=[])
         self.position_streamer.on_fill(self._on_fill)
-        self.price_streamer = BinanceStreamer(["BTC"])
+        self.price_streamer = BinanceStreamer(["BTC", "ETH", "SOL", "XRP"])
         self.orderbook_streamer = OrderbookStreamer()
-        self.futures_streamer = FuturesStreamer(["BTC"])
+        self.futures_streamer = FuturesStreamer(["BTC", "ETH", "SOL", "XRP"])
 
 
         # State
@@ -121,7 +121,7 @@ class TradingEngine:
         print(f"STRATEGY: {self.strategy.name.upper()}")
         print("=" * 60)
 
-        markets = get_15m_markets(assets=["BTC"])
+        markets = get_15m_markets(assets=["BTC", "ETH", "SOL", "XRP"])
         now = datetime.now(timezone.utc)
 
         # Clear stale data
@@ -280,51 +280,114 @@ class TradingEngine:
                 # Track pending order
                 self._pending_orders.add(token_id)
                 return
+
     def _execute_paper_action(
         self, cid: str, pos, action: Action, state: MarketState,
         price: float, trade_amount: float, size_label: str,
     ):
-        """Execute paper trade (update positions in memory only)."""
-        # Close existing position if switching sides
-        if pos.size > 0:
+        """Paper trade for training RL agent, different from the original paper trade."""
+        m = self.markets.get(cid)
+        if not m:
+            return
+        ob_up = self.orderbook_streamer.get_orderbook(cid, "UP")
+        ob_down = self.orderbook_streamer.get_orderbook(cid, "DOWN")
+
+        # Close existing position: SELL uses stored shares (from User Channel matched message)
+        if pos.size > 0 or pos.shares > 0:
+            # Use pos.shares (filled shares from User Channel); fallback to size/entry_price for paper/migration
+            # Strategy says SELL (sell UP) and we hold UP → close UP position by selling token_up
             if action.is_sell and pos.side == "UP":
-                shares = pos.size / pos.entry_price
+                shares = pos.shares * 0.98
+                price = ob_up.best_bid if ob_up and ob_up.best_bid is not None else price
                 pnl = (price - pos.entry_price) * shares
-                self._record_trade(pos, price, pnl, "CLOSE UP", cid=cid)
+                self._record_trade(pos, price, pnl, f"CLOSE UP", cid=cid)
                 self.pending_rewards[cid] = pnl
                 pos.size = 0
                 pos.side = None
+                pos.shares = 0
                 return
+            # Strategy says BUY (buy UP) and we hold DOWN → close DOWN position by selling token_down
             elif action.is_buy and pos.side == "DOWN":
-                exit_down_price = 1 - price
-                shares = pos.size / pos.entry_price
-                pnl = (exit_down_price - pos.entry_price) * shares
-                self._record_trade(pos, price, pnl, "CLOSE DOWN", cid=cid)
+                shares = pos.shares * 0.98
+                price = ob_down.best_bid if ob_down and ob_down.best_bid is not None else 1 - price
+                pnl = (price - pos.entry_price) * shares
+                self._record_trade(pos, price, pnl, f"CLOSE DOWN", cid=cid)
                 self.pending_rewards[cid] = pnl
                 pos.size = 0
                 pos.side = None
+                pos.shares = 0
                 return
 
-        # Open new position
+        # Open new position: BUY token_id. API expects size in shares; notional = size * price >= $1.
         if pos.size == 0:
             if action.is_buy:
                 pos.side = "UP"
-                pos.size = trade_amount
-                pos.entry_price = price
+                order_price = (ob_up.best_ask if ob_up and ob_up.best_ask is not None else price)
+                pos.shares = float(round(trade_amount / order_price))
+                pos.size = pos.shares * order_price
+                pos.entry_price = order_price
                 pos.entry_time = datetime.now(timezone.utc)
                 pos.entry_prob = price
                 pos.time_remaining_at_entry = state.time_remaining
-                print(f"    OPEN {pos.asset} UP ({size_label}) ${trade_amount:.0f} @ {price:.3f}")
+                print(f"    [Training] OPEN UP {pos.asset} ({size_label}) {pos.shares} shares @ {order_price:.3f}")
                 emit_trade(f"BUY_{size_label}", pos.asset, pos.size)
             elif action.is_sell:
                 pos.side = "DOWN"
-                pos.size = trade_amount
-                pos.entry_price = 1 - price
+                order_price = (ob_down.best_ask if ob_down and ob_down.best_ask is not None else 1 - price)
+                pos.shares = float(round(trade_amount / order_price))
+                pos.size = pos.shares * order_price
+                pos.entry_price = order_price
                 pos.entry_time = datetime.now(timezone.utc)
                 pos.entry_prob = price
                 pos.time_remaining_at_entry = state.time_remaining
-                print(f"    OPEN {pos.asset} DOWN ({size_label}) ${trade_amount:.0f} @ {1 - price:.3f}")
+                print(f"    [Training] OPEN DOWN {pos.asset} ({size_label}) {pos.shares} shares @ {order_price:.3f}")
                 emit_trade(f"SELL_{size_label}", pos.asset, pos.size)
+
+    # def _execute_paper_action(
+    #     self, cid: str, pos, action: Action, state: MarketState,
+    #     price: float, trade_amount: float, size_label: str,
+    # ):
+    #     """Execute paper trade (update positions in memory only)."""
+    #     # Close existing position if switching sides
+    #     if pos.size > 0:
+    #         if action.is_sell and pos.side == "UP":
+    #             shares = pos.size / pos.entry_price
+    #             pnl = (price - pos.entry_price) * shares
+    #             self._record_trade(pos, price, pnl, "CLOSE UP", cid=cid)
+    #             self.pending_rewards[cid] = pnl
+    #             pos.size = 0
+    #             pos.side = None
+    #             return
+    #         elif action.is_buy and pos.side == "DOWN":
+    #             exit_down_price = 1 - price
+    #             shares = pos.size / pos.entry_price
+    #             pnl = (exit_down_price - pos.entry_price) * shares
+    #             self._record_trade(pos, price, pnl, "CLOSE DOWN", cid=cid)
+    #             self.pending_rewards[cid] = pnl
+    #             pos.size = 0
+    #             pos.side = None
+    #             return
+
+    #     # Open new position
+    #     if pos.size == 0:
+    #         if action.is_buy:
+    #             pos.side = "UP"
+    #             pos.size = trade_amount
+    #             pos.entry_price = price
+    #             pos.entry_time = datetime.now(timezone.utc)
+    #             pos.entry_prob = price
+    #             pos.time_remaining_at_entry = state.time_remaining
+    #             print(f"    OPEN {pos.asset} UP ({size_label}) ${trade_amount:.0f} @ {price:.3f}")
+    #             emit_trade(f"BUY_{size_label}", pos.asset, pos.size)
+    #         elif action.is_sell:
+    #             pos.side = "DOWN"
+    #             pos.size = trade_amount
+    #             pos.entry_price = 1 - price
+    #             pos.entry_time = datetime.now(timezone.utc)
+    #             pos.entry_prob = price
+    #             pos.time_remaining_at_entry = state.time_remaining
+    #             print(f"    OPEN {pos.asset} DOWN ({size_label}) ${trade_amount:.0f} @ {1 - price:.3f}")
+    #             emit_trade(f"SELL_{size_label}", pos.asset, pos.size)
 
     def _record_trade(self, pos: Position, price: float, pnl: float, action: str, cid: str = None):
         """Record completed trade."""

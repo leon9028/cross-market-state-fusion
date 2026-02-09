@@ -172,7 +172,7 @@ class RLStrategy(Strategy):
         gamma: float = 0.95,  # Lower gamma for 15-min horizon (was 0.99)
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.2,
-        entropy_coef: float = 0.03,  # Lower entropy to allow sparse policy (mostly HOLD)
+        entropy_coef: float = 0.05,  # Lower entropy to allow sparse policy (mostly HOLD)
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         buffer_size: int = 256,  # Smaller buffer for faster adaptation (was 512)
