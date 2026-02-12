@@ -170,7 +170,7 @@ class RLStrategy(Strategy):
         lr_actor: float = 1e-4,
         lr_critic: float = 3e-4,
         gamma: float = 0.95,  # Lower gamma for 15-min horizon (was 0.99)
-        gae_lambda: float = 0.95,
+        gae_lambda: float = 0.99,
         clip_epsilon: float = 0.2,
         entropy_coef: float = 0.05,  # Lower entropy to allow sparse policy (mostly HOLD)
         value_coef: float = 0.5,
@@ -300,7 +300,20 @@ class RLStrategy(Strategy):
         )
 
         # Normalize reward
-        norm_reward = (reward - self.reward_mean) / (self.reward_std + 1e-8)
+        # norm_reward = (reward - self.reward_mean) / (self.reward_std + 1e-8)
+
+        # Fixed reward normalization
+        norm_reward = reward / max(1.0, self.reward_std)
+
+        # ========== [DEBUG START: 驗證假說] ==========
+        # 條件：實際 PnL 是負的 (賠錢)，但標準化後變成正的 (獎勵)
+        if reward < 0 and norm_reward > 0:
+            print(f"⚠️ [中毒警報] 發生符號翻轉！")
+            print(f"    實際 PnL (Raw): {reward:.6f} (賠錢)")
+            print(f"    平均水準 (Mean): {self.reward_mean:.6f} (大家都在賠)")
+            print(f"    給出的獎勵 (Norm): {norm_reward:.6f} (模型以為這是好事!)")
+            print(f"    原因: 因為你賠得比平均 ({self.reward_mean:.6f}) 少，所以被當成獲利。")
+        # ========== [DEBUG END] ====================
 
         # Get next temporal state (updates history with next_state)
         next_features = next_state.to_features()
@@ -377,6 +390,21 @@ class RLStrategy(Strategy):
         """Update policy using PPO with proper MLX autograd and temporal context."""
         if len(self.experiences) < self.buffer_size:
             return None
+
+        # ========== [DEBUG START: 驗證基準線] ==========
+        print(f"\n--- [RL Update] 檢查數據分佈 ---")
+        print(f"目前全局 Reward Mean: {self.reward_mean:.6f}")
+        
+        # 檢查 Buffer 裡的獎勵情況
+        raw_rewards = np.array([e.reward * (self.reward_std + 1e-8) + self.reward_mean for e in self.experiences])
+        # 注意：因為 experience 裡存的是 norm_reward，這裡嘗試還原一下或是直接看 norm_reward
+        stored_norm_rewards = np.array([e.reward for e in self.experiences])
+        
+        print(f"Buffer 內標準化獎勵 (Norm) -> Max: {stored_norm_rewards.max():.4f}, Min: {stored_norm_rewards.min():.4f}, Mean: {stored_norm_rewards.mean():.4f}")
+        
+        if self.reward_mean < -0.01:
+            print(f"🚨 警告: 全局平均值已變成負數 ({self.reward_mean:.6f})，Mean Centering 機制將開始將「小賠」視為「正獎勵」！")
+        # ========== [DEBUG END] ====================
 
         # Convert experiences to arrays (including temporal states)
         states = np.array([e.state for e in self.experiences], dtype=np.float32)

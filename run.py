@@ -214,7 +214,9 @@ class TradingEngine:
                 side = "SELL"
                 if token_id in self._pending_orders:
                     return
-                order_price = (ob_up.best_bid if ob_up and ob_up.best_bid is not None else price)
+                if not ob_up.best_bid:
+                    return
+                order_price = ob_up.best_bid
                 print(f"    [LIVE] SUBMIT CLOSE UP {pos.asset} {side} {pos.shares * 0.98} @ {order_price}")
                 create_and_submit_order(
                     self.clob_client, token_id, side, order_price, pos.shares * 0.98, order_type=OrderType.FOK
@@ -227,8 +229,9 @@ class TradingEngine:
                 side = "SELL"
                 if token_id in self._pending_orders:
                     return
-                down_price = 1 - price
-                order_price = (ob_down.best_bid if ob_down and ob_down.best_bid is not None else down_price)
+                if not ob_down.best_bid:
+                    return
+                order_price = ob_down.best_bid
                 print(f"    [LIVE] SUBMIT CLOSE DOWN {pos.asset} {side} {pos.shares * 0.98} @ {order_price}")
                 create_and_submit_order(
                     self.clob_client, token_id, side, order_price, pos.shares * 0.98, order_type=OrderType.FOK
@@ -244,9 +247,9 @@ class TradingEngine:
                 # Check if there's already a pending BUY order for this token
                 if token_id in self._pending_orders:
                     return
-                order_price = (ob_up.best_ask if ob_up and ob_up.best_ask is not None else price)
-                if not order_price or order_price <= 0:
+                if not ob_up.best_ask:
                     return
+                order_price = ob_up.best_ask
                 # Size in shares so notional = trade_amount; min notional $1
                 size_shares = trade_amount / order_price
                 size_shares = float(round(size_shares))  # round to integer
@@ -265,10 +268,9 @@ class TradingEngine:
                 # Check if there's already a pending BUY order for this token
                 if token_id in self._pending_orders:
                     return
-                down_price = 1 - price
-                order_price = (ob_down.best_ask if ob_down and ob_down.best_ask is not None else down_price)
-                if not order_price or order_price <= 0:
+                if not ob_down.best_ask:
                     return
+                order_price = ob_down.best_ask
                 size_shares = trade_amount / order_price
                 size_shares = float(round(size_shares))  # round to integer
                 if size_shares < 1.0 / order_price:
@@ -297,10 +299,13 @@ class TradingEngine:
             # Use pos.shares (filled shares from User Channel); fallback to size/entry_price for paper/migration
             # Strategy says SELL (sell UP) and we hold UP → close UP position by selling token_up
             if action.is_sell and pos.side == "UP":
-                shares = pos.shares * 0.98
-                price = ob_up.best_bid if ob_up and ob_up.best_bid is not None else price
-                pnl = (price - pos.entry_price) * shares
-                self._record_trade(pos, price, pnl, f"CLOSE UP", cid=cid)
+                if not ob_up.best_bid:
+                    return
+                exit_price = ob_up.best_bid
+                proceeds = exit_price * (0.98 * pos.shares)
+                cost_basis = pos.entry_price * pos.shares
+                pnl = proceeds - cost_basis
+                self._record_trade(pos, exit_price, pnl, f"CLOSE UP", cid=cid)
                 self.pending_rewards[cid] = pnl
                 pos.size = 0
                 pos.side = None
@@ -308,10 +313,13 @@ class TradingEngine:
                 return
             # Strategy says BUY (buy UP) and we hold DOWN → close DOWN position by selling token_down
             elif action.is_buy and pos.side == "DOWN":
-                shares = pos.shares * 0.98
-                price = ob_down.best_bid if ob_down and ob_down.best_bid is not None else 1 - price
-                pnl = (price - pos.entry_price) * shares
-                self._record_trade(pos, price, pnl, f"CLOSE DOWN", cid=cid)
+                if not ob_down.best_bid:
+                    return
+                exit_price = ob_down.best_bid
+                proceeds = exit_price * (0.98 * pos.shares)
+                cost_basis = pos.entry_price * pos.shares
+                pnl = proceeds - cost_basis
+                self._record_trade(pos, exit_price, pnl, f"CLOSE DOWN", cid=cid)
                 self.pending_rewards[cid] = pnl
                 pos.size = 0
                 pos.side = None
@@ -322,7 +330,9 @@ class TradingEngine:
         if pos.size == 0:
             if action.is_buy:
                 pos.side = "UP"
-                order_price = (ob_up.best_ask if ob_up and ob_up.best_ask is not None else price)
+                if not ob_up.best_ask:
+                    return
+                order_price = ob_up.best_ask
                 pos.shares = float(round(trade_amount / order_price))
                 pos.size = pos.shares * order_price
                 pos.entry_price = order_price
@@ -333,7 +343,9 @@ class TradingEngine:
                 emit_trade(f"BUY_{size_label}", pos.asset, pos.size)
             elif action.is_sell:
                 pos.side = "DOWN"
-                order_price = (ob_down.best_ask if ob_down and ob_down.best_ask is not None else 1 - price)
+                if not ob_down.best_ask:
+                    return
+                order_price = ob_down.best_ask
                 pos.shares = float(round(trade_amount / order_price))
                 pos.size = pos.shares * order_price
                 pos.entry_price = order_price
