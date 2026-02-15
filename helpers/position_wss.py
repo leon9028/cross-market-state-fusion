@@ -248,6 +248,7 @@ class PositionStreamer:
             return None
         # API may return condition_id with or without 0x
         condition_id = market if market.startswith("0x") else market
+        print(f"✓ Fill Data: {data}")
         try:
             price = float(data.get("price") or 0)
             size = float(data.get("size") or 0)

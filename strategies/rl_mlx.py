@@ -172,7 +172,7 @@ class RLStrategy(Strategy):
         gamma: float = 0.95,  # Lower gamma for 15-min horizon (was 0.99)
         gae_lambda: float = 0.99,
         clip_epsilon: float = 0.2,
-        entropy_coef: float = 0.05,  # Lower entropy to allow sparse policy (mostly HOLD)
+        entropy_coef: float = 0.03,  # Lower entropy to allow sparse policy (mostly HOLD)
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         buffer_size: int = 256,  # Smaller buffer for faster adaptation (was 512)
@@ -300,10 +300,10 @@ class RLStrategy(Strategy):
         )
 
         # Normalize reward
-        # norm_reward = (reward - self.reward_mean) / (self.reward_std + 1e-8)
+        norm_reward = (reward - self.reward_mean) / (self.reward_std + 1e-8)
 
         # Fixed reward normalization
-        norm_reward = reward / max(1.0, self.reward_std)
+        # norm_reward = reward / max(1.0, self.reward_std)
 
         # ========== [DEBUG START: 驗證假說] ==========
         # 條件：實際 PnL 是負的 (賠錢)，但標準化後變成正的 (獎勵)

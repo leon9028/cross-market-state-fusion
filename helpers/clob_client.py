@@ -1,9 +1,11 @@
+from turtle import pos
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
 from py_clob_client.constants import POLYGON
 from py_clob_client.order_builder.constants import BUY, SELL
 import os
 from typing import Literal
+import requests
 
 try:
     from dotenv import load_dotenv
@@ -84,6 +86,43 @@ def create_and_submit_order(
     return resp if isinstance(resp, dict) else {"success": True, "response": resp}
 
 
+def get_positions(user_address: str = None) -> list[dict]: # fetch the positions details of the user
+    
+    if not user_address:
+        user_address = os.getenv("FUNDER")
+        
+    if not user_address:
+        print("❌ Error: Missing user address")
+        return []
+
+    url = f"https://data-api.polymarket.com/positions?user={user_address}&sizeThreshold=0.1&limit=100&sortBy=TOKENS&sortDirection=DESC&redeemable=False"
+
+    try:
+        response = requests.get(url)
+        return response.json()
+    except Exception as e:
+        print(f"❌ Request Failed: {e}")
+        return []
+
+def get_token_position_value(asset_id: str) -> float:
+    """
+    獲取特定 token 的當前持倉價值
+    
+    Args:
+        asset_id: Token ID
+    
+    Returns:
+        float: 當前持倉價值 (USDC)，如果沒有持倉則返回 0
+    """
+    positions = get_positions()
+    for position in positions:
+        if position.get('asset') == asset_id:
+            size_value = float(position.get('size', 0))
+            # truncated_size = int(size_value * 10) / 10.0
+            truncated_size = size_value
+            return float(position.get('currentValue', 0)), truncated_size
+    return 0.0, 0.0
+
 if __name__ == "__main__":
     # Test: create client and verify connection (no order placed).
     # Requires .env: PK, FUNDER, CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE
@@ -122,5 +161,15 @@ if __name__ == "__main__":
             return
 
         print("\nAll checks passed. Client is ready (no order was placed).")
+
+        position = get_positions()
+        print(f"✓ Position: {position}")
+        position_value, truncated_size = get_token_position_value(position[0].get('asset'))
+        print(f"✓ Position Value: {position_value}")
+        print(f"✓ Truncated Size: {truncated_size}")
+        print(f"✓ Current Price: {position[0].get('curPrice')}")
+
+        resp = create_and_submit_order(client, position[0].get('asset'), "SELL", position[0].get('curPrice'), truncated_size)
+        print(f"✓ Response: {resp}")
 
     main()

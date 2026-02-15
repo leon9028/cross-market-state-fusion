@@ -17,6 +17,7 @@ import argparse
 import copy
 import sys
 import threading
+import time
 from datetime import date, datetime, timezone
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -32,7 +33,7 @@ from helpers import (
     PositionStreamer,
     FillData,
 )
-from helpers.clob_client import make_client, create_and_submit_order
+from helpers.clob_client import make_client, create_and_submit_order, get_token_position_value
 from py_clob_client.clob_types import OrderType
 from strategies import (
     Strategy, MarketState, Action,
@@ -301,10 +302,8 @@ class TradingEngine:
             if action.is_sell and pos.side == "UP":
                 if not ob_up.best_bid:
                     return
-                exit_price = ob_up.best_bid
-                proceeds = exit_price * (0.98 * pos.shares)
-                cost_basis = pos.entry_price * pos.shares
-                pnl = proceeds - cost_basis
+                exit_price = price
+                pnl = (exit_price - pos.entry_price) * pos.shares
                 self._record_trade(pos, exit_price, pnl, f"CLOSE UP", cid=cid)
                 self.pending_rewards[cid] = pnl
                 pos.size = 0
@@ -315,10 +314,8 @@ class TradingEngine:
             elif action.is_buy and pos.side == "DOWN":
                 if not ob_down.best_bid:
                     return
-                exit_price = ob_down.best_bid
-                proceeds = exit_price * (0.98 * pos.shares)
-                cost_basis = pos.entry_price * pos.shares
-                pnl = proceeds - cost_basis
+                exit_price = price
+                pnl = (exit_price - pos.entry_price) * pos.shares
                 self._record_trade(pos, exit_price, pnl, f"CLOSE DOWN", cid=cid)
                 self.pending_rewards[cid] = pnl
                 pos.size = 0
@@ -332,12 +329,12 @@ class TradingEngine:
                 pos.side = "UP"
                 if not ob_up.best_ask:
                     return
-                order_price = ob_up.best_ask
+                order_price = price
                 pos.shares = float(round(trade_amount / order_price))
                 pos.size = pos.shares * order_price
                 pos.entry_price = order_price
                 pos.entry_time = datetime.now(timezone.utc)
-                pos.entry_prob = price
+                pos.entry_prob = order_price
                 pos.time_remaining_at_entry = state.time_remaining
                 print(f"    [Training] OPEN UP {pos.asset} ({size_label}) {pos.shares} shares @ {order_price:.3f}")
                 emit_trade(f"BUY_{size_label}", pos.asset, pos.size)
@@ -345,12 +342,12 @@ class TradingEngine:
                 pos.side = "DOWN"
                 if not ob_down.best_ask:
                     return
-                order_price = ob_down.best_ask
+                order_price = price
                 pos.shares = float(round(trade_amount / order_price))
                 pos.size = pos.shares * order_price
                 pos.entry_price = order_price
                 pos.entry_time = datetime.now(timezone.utc)
-                pos.entry_prob = price
+                pos.entry_prob = order_price
                 pos.time_remaining_at_entry = state.time_remaining
                 print(f"    [Training] OPEN DOWN {pos.asset} ({size_label}) {pos.shares} shares @ {order_price:.3f}")
                 emit_trade(f"SELL_{size_label}", pos.asset, pos.size)
@@ -454,11 +451,51 @@ class TradingEngine:
             return f"0x{raw_cid}"
         return None
 
+    async def _update_position_from_api(self, fill: FillData, pos: Position, time_remaining: float):
+        """Update position asynchronously without blocking main loop."""
+        print(f"    [API] Verifying position size for {fill.asset_id}...")
+        
+        # Try for up to 10 seconds (20 * 0.5s)
+        for _ in range(20):
+            try:
+                # Need to run blocking request in executor
+                loop = asyncio.get_running_loop()
+                _, actual_shares = await loop.run_in_executor(
+                    None, 
+                    get_token_position_value, 
+                    fill.asset_id
+                )
+                
+                if actual_shares > 0:
+                    pos.shares = actual_shares
+                    pos.size = pos.shares * fill.price
+                    pos.side = fill.outcome
+                    pos.entry_price = fill.price
+                    pos.entry_time = datetime.now(timezone.utc)
+                    pos.entry_prob = fill.price
+                    pos.time_remaining_at_entry = time_remaining
+                    print(f"    [API] Verified position size: {pos.shares} shares")
+                    print(f"    [FILL] OPEN {pos.asset} {pos.side} {pos.shares} shares @ {fill.price} (${pos.size})")
+                    return
+            except Exception as e:
+                print(f"    [API] Error fetching position: {e}")
+                
+            # print(f"    [API] Position not updated yet, retrying in 0.5s...")
+            await asyncio.sleep(0.5)
+            
+        # Fallback if timeout
+        print(f"    [API] Timeout verifying position, using fill size: {fill.size}")
+        pos.shares = fill.size
+        pos.size = pos.shares * fill.price
+        pos.side = fill.outcome
+        pos.entry_price = fill.price
+        pos.entry_time = datetime.now(timezone.utc)
+        pos.entry_prob = fill.price
+        pos.time_remaining_at_entry = time_remaining
+        print(f"    [FILL] OPEN {pos.asset} {pos.side} {pos.shares} shares @ {fill.price} (${pos.size})")
+
     def _on_fill(self, fill: FillData):
-        """Update positions from User Channel fill (status MATCHED).
-        BUY order uses USD; User Channel matched message gives filled shares.
-        We store pos.shares = filled shares; SELL (close) uses pos.shares for order size.
-        """
+        """Update positions from User Channel fill (status MATCHED)."""
         cid = self._resolve_condition_id(fill.condition_id)
         pos = self.positions.get(cid)
         if not pos:
@@ -470,15 +507,8 @@ class TradingEngine:
         self._pending_orders.discard(fill.asset_id)
 
         if fill.side == "BUY":
-            # fill.size = filled shares (tokens) from User Channel
-            pos.shares = fill.size
-            pos.size = fill.size * fill.price
-            pos.side = fill.outcome
-            pos.entry_price = fill.price
-            pos.entry_time = datetime.now(timezone.utc)
-            pos.entry_prob = fill.price
-            pos.time_remaining_at_entry = time_remaining
-            print(f"    [FILL] OPEN {pos.asset} {pos.side} {pos.shares} shares @ {fill.price} (${pos.size})")
+            # Launch async task to verify position without blocking
+            asyncio.create_task(self._update_position_from_api(fill, pos, time_remaining))
         else:
             if pos.shares <= 0 and pos.size <= 0:
                 return
@@ -627,10 +657,14 @@ class TradingEngine:
                     state.position_side = pos.side
                     shares = pos.shares if pos.shares > 0 else (pos.size / pos.entry_price if pos.entry_price else 0)
                     if pos.side == "UP":
-                        state.position_pnl = (state.prob - pos.entry_price) * shares
+                        current_up_price = state.prob
+                        state.position_pnl = (current_up_price - pos.entry_price) * shares
+                        # state.position_pnl = (state.best_bid - pos.entry_price) * shares
                     else:
                         current_down_price = 1 - state.prob
                         state.position_pnl = (current_down_price - pos.entry_price) * shares
+                        # current_down_price = self.orderbook_streamer.get_orderbook(cid, "DOWN").best_bid if self.orderbook_streamer.get_orderbook(cid, "DOWN").best_bid else 0
+                        # state.position_pnl = (current_down_price - pos.entry_price) * shares
                 else:
                     state.has_position = False
                     state.position_side = None
