@@ -314,7 +314,7 @@ class TradingEngine:
             elif action.is_buy and pos.side == "DOWN":
                 if not ob_down.best_bid:
                     return
-                exit_price = price
+                exit_price = 1 - price
                 pnl = (exit_price - pos.entry_price) * pos.shares
                 self._record_trade(pos, exit_price, pnl, f"CLOSE DOWN", cid=cid)
                 self.pending_rewards[cid] = pnl
@@ -342,7 +342,7 @@ class TradingEngine:
                 pos.side = "DOWN"
                 if not ob_down.best_ask:
                     return
-                order_price = price
+                order_price = 1 - price
                 pos.shares = float(round(trade_amount / order_price))
                 pos.size = pos.shares * order_price
                 pos.entry_price = order_price

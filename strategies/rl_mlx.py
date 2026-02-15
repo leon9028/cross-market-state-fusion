@@ -170,7 +170,7 @@ class RLStrategy(Strategy):
         lr_actor: float = 1e-4,
         lr_critic: float = 3e-4,
         gamma: float = 0.95,  # Lower gamma for 15-min horizon (was 0.99)
-        gae_lambda: float = 0.99,
+        gae_lambda: float = 0.95,
         clip_epsilon: float = 0.2,
         entropy_coef: float = 0.03,  # Lower entropy to allow sparse policy (mostly HOLD)
         value_coef: float = 0.5,
