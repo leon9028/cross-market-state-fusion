@@ -167,8 +167,8 @@ class RLStrategy(Strategy):
         critic_hidden_size: int = 96,  # Larger critic for better value estimation
         history_len: int = 5,  # Number of past states for temporal processing
         temporal_dim: int = 32,  # Temporal encoder output size
-        lr_actor: float = 1e-4,
-        lr_critic: float = 3e-4,
+        lr_actor: float = 5e-5,
+        lr_critic: float = 1.5e-4,
         gamma: float = 0.95,  # Lower gamma for 15-min horizon (was 0.99)
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.2,
