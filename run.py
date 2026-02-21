@@ -60,6 +60,7 @@ class Position:
     side: Optional[str] = None
     size: float = 0.0  # USD notional (paper) or for display; live close uses shares
     entry_price: float = 0.0
+    entry_mid_price: float = 0.0
     entry_time: Optional[datetime] = None
     entry_prob: float = 0.0
     time_remaining_at_entry: float = 0.0
@@ -108,6 +109,7 @@ class TradingEngine:
 
         # Pending rewards for RL (set on position close)
         self.pending_rewards: Dict[str, float] = {}
+        self.pending_mid_rewards: Dict[str, float] = {}
 
         # Live: track pending orders at market (cid) level until position is verified
         # Prevents any new order for a market while a previous order is being processed
@@ -281,10 +283,12 @@ class TradingEngine:
             if action.is_sell and pos.side == "UP":
                 if not ob_up.best_bid:
                     return
-                exit_price = price
-                pnl = (exit_price - pos.entry_price) * pos.shares
-                self._record_trade(pos, exit_price, pnl, f"CLOSE UP", cid=cid)
-                self.pending_rewards[cid] = pnl
+                exit_price = ob_up.best_bid
+                real_pnl = (exit_price - pos.entry_price) * pos.shares
+                mid_pnl = (price - pos.entry_mid_price) * pos.shares
+                self._record_trade(pos, exit_price, real_pnl, f"CLOSE UP", cid=cid)
+                self.pending_rewards[cid] = real_pnl
+                self.pending_mid_rewards[cid] = mid_pnl
                 pos.size = 0
                 pos.side = None
                 pos.shares = 0
@@ -293,10 +297,12 @@ class TradingEngine:
             elif action.is_buy and pos.side == "DOWN":
                 if not ob_down.best_bid:
                     return
-                exit_price = 1 - price
-                pnl = (exit_price - pos.entry_price) * pos.shares
-                self._record_trade(pos, exit_price, pnl, f"CLOSE DOWN", cid=cid)
-                self.pending_rewards[cid] = pnl
+                exit_price = ob_down.best_bid
+                real_pnl = (exit_price - pos.entry_price) * pos.shares
+                mid_pnl = ((1 - price) - pos.entry_mid_price) * pos.shares
+                self._record_trade(pos, exit_price, real_pnl, f"CLOSE DOWN", cid=cid)
+                self.pending_rewards[cid] = real_pnl
+                self.pending_mid_rewards[cid] = mid_pnl
                 pos.size = 0
                 pos.side = None
                 pos.shares = 0
@@ -308,10 +314,11 @@ class TradingEngine:
                 pos.side = "UP"
                 if not ob_up.best_ask:
                     return
-                order_price = price
+                order_price = ob_up.best_ask
                 pos.shares = float(round(trade_amount / order_price))
                 pos.size = pos.shares * order_price
                 pos.entry_price = order_price
+                pos.entry_mid_price = price
                 pos.entry_time = datetime.now(timezone.utc)
                 pos.entry_prob = order_price
                 pos.time_remaining_at_entry = state.time_remaining
@@ -321,10 +328,11 @@ class TradingEngine:
                 pos.side = "DOWN"
                 if not ob_down.best_ask:
                     return
-                order_price = 1 - price
+                order_price = ob_down.best_ask
                 pos.shares = float(round(trade_amount / order_price))
                 pos.size = pos.shares * order_price
                 pos.entry_price = order_price
+                pos.entry_mid_price = 1 - price
                 pos.entry_time = datetime.now(timezone.utc)
                 pos.entry_prob = order_price
                 pos.time_remaining_at_entry = state.time_remaining
@@ -412,11 +420,25 @@ class TradingEngine:
                 condition_id=cid
             )
 
-    def _compute_step_reward(self, cid: str, state: MarketState, action: Action, pos: Position) -> float:
-        """Compute reward signal for RL training - pure realized PnL."""
-        # Only reward on position close - cleaner signal
-        # Reward is set when trade closes in _execute_trade via self.pending_rewards
-        return self.pending_rewards.pop(cid, 0.0)
+    def _compute_step_reward(self, cid: str, state: 'MarketState', action: 'Action', pos: 'Position') -> float:
+        """Compute reward signal for RL training - Blended Reward."""
+        
+        # 1. 拿出真實的 PnL (含價差，通常會是負數)
+        real_pnl = self.pending_rewards.pop(cid, 0.0)
+        
+        # 2. 拿出理論的 PnL (純方向預測，無價差)
+        mid_pnl = self.pending_mid_rewards.pop(cid, 0.0)
+            
+        # 3. 混合公式 (Reward Shaping)
+        # alpha 係數控制「安慰獎」的比例。0.2 代表給予 20% 的方向正確獎勵
+        alpha = 0.2
+        
+        # 例如：價差賠了 -0.05，但方向對了理論賺 +0.10
+        # total_reward = -0.05 + (0.2 * 0.10) = -0.03
+        # 雖然還是懲罰，但比原本的 -0.05 輕微，告訴模型「方向是對的」
+        total_reward = real_pnl + (alpha * mid_pnl)
+        
+        return total_reward
 
     def _resolve_condition_id(self, raw_cid: str) -> Optional[str]:
         """Resolve fill condition_id to engine's position key (0x or no-0x)."""
@@ -627,14 +649,14 @@ class TradingEngine:
                     state.position_side = pos.side
                     shares = pos.shares if pos.shares > 0 else (pos.size / pos.entry_price if pos.entry_price else 0)
                     if pos.side == "UP":
-                        current_up_price = state.prob
-                        state.position_pnl = (current_up_price - pos.entry_price) * shares
-                        # state.position_pnl = (state.best_bid - pos.entry_price) * shares
+                        # current_up_price = state.prob
+                        # state.position_pnl = (current_up_price - pos.entry_price) * shares
+                        state.position_pnl = (state.best_bid - pos.entry_price) * shares
                     else:
-                        current_down_price = 1 - state.prob
-                        state.position_pnl = (current_down_price - pos.entry_price) * shares
-                        # current_down_price = self.orderbook_streamer.get_orderbook(cid, "DOWN").best_bid if self.orderbook_streamer.get_orderbook(cid, "DOWN").best_bid else 0
+                        # current_down_price = 1 - state.prob
                         # state.position_pnl = (current_down_price - pos.entry_price) * shares
+                        current_down_price = self.orderbook_streamer.get_orderbook(cid, "DOWN").best_bid if self.orderbook_streamer.get_orderbook(cid, "DOWN").best_bid else 0
+                        state.position_pnl = (current_down_price - pos.entry_price) * shares
                 else:
                     state.has_position = False
                     state.position_side = None
