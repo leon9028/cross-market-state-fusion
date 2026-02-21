@@ -10,6 +10,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 from collections import deque
+from safetensors.torch import save_file as safetensors_save
+from safetensors.torch import load_file as safetensors_load
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 from .base import Strategy, MarketState, Action
@@ -109,7 +111,7 @@ class RLStrategy(Strategy):
         gamma: float = 0.95,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.2,
-        entropy_coef: float = 0.05,
+        entropy_coef: float = 0.03,  # Lower entropy to allow sparse policy (mostly HOLD)
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         buffer_size: int = 256,
@@ -212,11 +214,8 @@ class RLStrategy(Strategy):
             / max(1, self.reward_count)
         )
 
-        # Normalize reward
-        # norm_reward = (reward - self.reward_mean) / (self.reward_std + 1e-8)
-
-        # Fixed reward normalization
-        norm_reward = reward / max(1.0, self.reward_std)
+        # Normalize reward (same as rl_mlx: mean-centering + scale by std)
+        norm_reward = (reward - self.reward_mean) / (self.reward_std + 1e-8)
 
         # ========== [DEBUG START: 驗證假說] ==========
         # 條件：實際 PnL 是負的 (賠錢)，但標準化後變成正的 (獎勵)
@@ -265,7 +264,7 @@ class RLStrategy(Strategy):
         if len(self.experiences) < self.buffer_size:
             return None
 
-            # ========== [DEBUG START: 驗證基準線] ==========
+        # ========== [DEBUG START: 驗證基準線] ==========
         print(f"\n--- [RL Update] 檢查數據分佈 ---")
         print(f"目前全局 Reward Mean: {self.reward_mean:.6f}")
         
@@ -393,11 +392,15 @@ class RLStrategy(Strategy):
         self._last_temporal_state = None
 
     def save(self, path: str):
+        """Save in same format as rl_mlx: .safetensors (weights) + _stats.npz (stats)."""
         base = path.replace(".npz", "").replace(".safetensors", "").replace(".pt", "")
-        torch.save({
-            "actor": self.actor.state_dict(),
-            "critic": self.critic.state_dict(),
-        }, base + ".pt")
+        # Flatten keys with actor./critic. prefix to match rl_mlx format
+        weights = {}
+        for k, v in self.actor.state_dict().items():
+            weights["actor." + k] = v
+        for k, v in self.critic.state_dict().items():
+            weights["critic." + k] = v
+        safetensors_save(weights, base + ".safetensors")
         np.savez(
             base + "_stats.npz",
             reward_mean=self.reward_mean,
@@ -413,10 +416,18 @@ class RLStrategy(Strategy):
         )
 
     def load(self, path: str):
+        """Load from .safetensors + _stats.npz (same as rl_mlx). Falls back to .pt if no safetensors."""
         base = path.replace(".npz", "").replace(".safetensors", "").replace(".pt", "")
-        ckpt = torch.load(base + ".pt", map_location=self.device, weights_only=True)
-        self.actor.load_state_dict(ckpt["actor"])
-        self.critic.load_state_dict(ckpt["critic"])
+        try:
+            weights = safetensors_load(base + ".safetensors", device=str(self.device))
+            actor_sd = {k.replace("actor.", "", 1): v for k, v in weights.items() if k.startswith("actor.")}
+            critic_sd = {k.replace("critic.", "", 1): v for k, v in weights.items() if k.startswith("critic.")}
+            self.actor.load_state_dict(actor_sd, strict=True)
+            self.critic.load_state_dict(critic_sd, strict=True)
+        except FileNotFoundError:
+            ckpt = torch.load(base + ".pt", map_location=self.device, weights_only=True)
+            self.actor.load_state_dict(ckpt["actor"])
+            self.critic.load_state_dict(ckpt["critic"])
         stats = np.load(base + "_stats.npz", allow_pickle=True)
         self.reward_mean = float(stats["reward_mean"])
         self.reward_std = float(stats["reward_std"])

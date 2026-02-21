@@ -109,9 +109,9 @@ class TradingEngine:
         # Pending rewards for RL (set on position close)
         self.pending_rewards: Dict[str, float] = {}
 
-        # Live: track pending orders (token_id set) until fill received
-        # Prevents duplicate BUY/SELL orders for same token before fill arrives
-        self._pending_orders: set = set()  # Set of token_ids with pending orders
+        # Live: track pending orders at market (cid) level until position is verified
+        # Prevents any new order for a market while a previous order is being processed
+        self._pending_orders: set = set()  # Set of condition_ids with pending orders
 
         # Logger (for RL training)
         self.logger = get_logger() if isinstance(strategy, RLStrategy) else None
@@ -184,13 +184,7 @@ class TradingEngine:
             try:
                 self._execute_live_order(cid, pos, action, state, price, trade_amount, size_label)
             except Exception as e:
-                # On order failure, clear pending order so we can retry
-                # Note: We don't know which token_id failed, so we'll clear all for this market
-                m = self.markets.get(cid)
-                if m:
-                    self._pending_orders.discard(m.token_up)
-                    self._pending_orders.discard(m.token_down)
-                    print(f"    [LIVE] Order failed: {e}")
+                print(f"    [LIVE] Order failed (no pending change): {e} | pending_orders={[c[:12] for c in self._pending_orders]}")
             return
         # Paper: update positions in memory
         self._execute_paper_action(cid, pos, action, state, price, trade_amount, size_label)
@@ -206,82 +200,67 @@ class TradingEngine:
         ob_up = self.orderbook_streamer.get_orderbook(cid, "UP")
         ob_down = self.orderbook_streamer.get_orderbook(cid, "DOWN")
 
-        # Close existing position: SELL uses stored shares (from User Channel matched message)
+        # Guard: block ALL orders for this market if any order is pending
+        if cid in self._pending_orders:
+            print(f"    [PENDING] BLOCKED {pos.asset} — cid {cid[:12]}... already pending | pending_orders={[c[:12] for c in self._pending_orders]}")
+            return
+
+        # Close existing position
         if pos.size > 0 or pos.shares > 0:
-            # Use pos.shares (filled shares from User Channel); fallback to size/entry_price for paper/migration
-            # Strategy says SELL (sell UP) and we hold UP → close UP position by selling token_up
             if action.is_sell and pos.side == "UP":
                 token_id = m.token_up
-                side = "SELL"
-                if token_id in self._pending_orders:
-                    return
                 if not ob_up.best_bid:
                     return
-                order_price = ob_up.best_bid
-                print(f"    [LIVE] SUBMIT CLOSE UP {pos.asset} {side} {pos.shares * 0.98} @ {order_price}")
+                order_price = price
+                print(f"    [LIVE] SUBMIT CLOSE UP {pos.asset} SELL {pos.shares} @ {order_price}")
                 create_and_submit_order(
-                    self.clob_client, token_id, side, order_price, pos.shares * 0.98, order_type=OrderType.FOK
+                    self.clob_client, token_id, "SELL", order_price, pos.shares, order_type=OrderType.FOK
                 )
-                self._pending_orders.add(token_id)
+                self._pending_orders.add(cid)
+                print(f"    [PENDING] ADDED CLOSE UP cid={cid[:12]}... | pending_orders={[c[:12] for c in self._pending_orders]}")
                 return
-            # Strategy says BUY (buy UP) and we hold DOWN → close DOWN position by selling token_down
             elif action.is_buy and pos.side == "DOWN":
                 token_id = m.token_down
-                side = "SELL"
-                if token_id in self._pending_orders:
-                    return
                 if not ob_down.best_bid:
                     return
-                order_price = ob_down.best_bid
-                print(f"    [LIVE] SUBMIT CLOSE DOWN {pos.asset} {side} {pos.shares * 0.98} @ {order_price}")
+                order_price = 1 - price
+                print(f"    [LIVE] SUBMIT CLOSE DOWN {pos.asset} SELL {pos.shares} @ {order_price}")
                 create_and_submit_order(
-                    self.clob_client, token_id, side, order_price, pos.shares * 0.98, order_type=OrderType.FOK
+                    self.clob_client, token_id, "SELL", order_price, pos.shares, order_type=OrderType.FOK
                 )
-                self._pending_orders.add(token_id)
+                self._pending_orders.add(cid)
+                print(f"    [PENDING] ADDED CLOSE DOWN cid={cid[:12]}... | pending_orders={[c[:12] for c in self._pending_orders]}")
                 return
 
-        # Open new position: BUY token_id. API expects size in shares; notional = size * price >= $1.
+        # Open new position
         if pos.size == 0:
             if action.is_buy:
                 token_id = m.token_up
-                side = "BUY"
-                # Check if there's already a pending BUY order for this token
-                if token_id in self._pending_orders:
-                    return
-                if not ob_up.best_ask:
-                    return
-                order_price = ob_up.best_ask
-                # Size in shares so notional = trade_amount; min notional $1
+                order_price = price
                 size_shares = trade_amount / order_price
-                size_shares = float(round(size_shares))  # round to integer
-                if size_shares < 1.0 / order_price:  # below min $1
+                size_shares = float(round(size_shares))
+                if size_shares < 1.0 / order_price:
                     return
-                print(f"    [LIVE] SUBMIT OPEN UP {pos.asset} ({size_label}) {side} {size_shares} shares @ {order_price} (${trade_amount})")
+                print(f"    [LIVE] SUBMIT OPEN UP {pos.asset} ({size_label}) BUY {size_shares} shares @ {order_price} (${trade_amount})")
                 create_and_submit_order(
-                    self.clob_client, token_id, side, order_price, size_shares, order_type=OrderType.FOK
+                    self.clob_client, token_id, "BUY", order_price, size_shares, order_type=OrderType.FOK
                 )
-                # Track pending order
-                self._pending_orders.add(token_id)
+                self._pending_orders.add(cid)
+                print(f"    [PENDING] ADDED OPEN UP cid={cid[:12]}... | pending_orders={[c[:12] for c in self._pending_orders]}")
                 return
             elif action.is_sell:
                 token_id = m.token_down
-                side = "BUY"  # Buying DOWN token
-                # Check if there's already a pending BUY order for this token
-                if token_id in self._pending_orders:
-                    return
-                if not ob_down.best_ask:
-                    return
-                order_price = ob_down.best_ask
+                order_price = 1 - price
                 size_shares = trade_amount / order_price
-                size_shares = float(round(size_shares))  # round to integer
+                size_shares = float(round(size_shares))
                 if size_shares < 1.0 / order_price:
                     return
-                print(f"    [LIVE] SUBMIT OPEN DOWN {pos.asset} ({size_label}) {side} {size_shares} shares @ {order_price} (${trade_amount})")
+                print(f"    [LIVE] SUBMIT OPEN DOWN {pos.asset} ({size_label}) BUY {size_shares} shares @ {order_price} (${trade_amount})")
                 create_and_submit_order(
-                    self.clob_client, token_id, side, order_price, size_shares, order_type=OrderType.FOK
+                    self.clob_client, token_id, "BUY", order_price, size_shares, order_type=OrderType.FOK
                 )
-                # Track pending order
-                self._pending_orders.add(token_id)
+                self._pending_orders.add(cid)
+                print(f"    [PENDING] ADDED OPEN DOWN cid={cid[:12]}... | pending_orders={[c[:12] for c in self._pending_orders]}")
                 return
 
     def _execute_paper_action(
@@ -451,48 +430,50 @@ class TradingEngine:
             return f"0x{raw_cid}"
         return None
 
-    async def _update_position_from_api(self, fill: FillData, pos: Position, time_remaining: float):
-        """Update position asynchronously without blocking main loop."""
-        print(f"    [API] Verifying position size for {fill.asset_id}...")
+    async def _update_position_from_api(self, fill: FillData, cid: str, pos: Position, time_remaining: float, expect_closed: bool = False):
+        """Poll API to verify position after fill. BUY: wait for shares > 0. SELL (expect_closed): wait for shares <= 0."""
+        mode = "CLOSE" if expect_closed else "OPEN"
         
-        # Try for up to 10 seconds (20 * 0.5s)
-        for _ in range(20):
+        for _ in range(100):
             try:
-                # Need to run blocking request in executor
                 loop = asyncio.get_running_loop()
                 _, actual_shares = await loop.run_in_executor(
-                    None, 
-                    get_token_position_value, 
-                    fill.asset_id
+                    None, get_token_position_value, fill.asset_id
                 )
-                
-                if actual_shares > 0:
-                    pos.shares = actual_shares
-                    pos.size = pos.shares * fill.price
-                    pos.side = fill.outcome
-                    pos.entry_price = fill.price
-                    pos.entry_time = datetime.now(timezone.utc)
-                    pos.entry_prob = fill.price
-                    pos.time_remaining_at_entry = time_remaining
-                    print(f"    [API] Verified position size: {pos.shares} shares")
-                    print(f"    [FILL] OPEN {pos.asset} {pos.side} {pos.shares} shares @ {fill.price} (${pos.size})")
-                    return
+
+                if expect_closed:
+                    if actual_shares <= 0:
+                        close_side = fill.outcome
+                        pnl = (fill.price - pos.entry_price) * fill.size
+                        self._record_trade(pos, fill.price, pnl, f"CLOSE {close_side}", cid=cid)
+                        self.pending_rewards[cid] = pnl
+                        pos.size = 0
+                        pos.side = None
+                        pos.shares = 0
+                        self._pending_orders.discard(cid)
+                        print(f"    [PENDING] API verified {mode} — REMOVED cid={cid[:12]}... | actual_shares={actual_shares} | pending_orders={[c[:12] for c in self._pending_orders]}")
+                        return
+                else:
+                    if actual_shares > 0:
+                        pos.shares = actual_shares
+                        pos.size = pos.shares * fill.price
+                        pos.side = fill.outcome
+                        pos.entry_price = fill.price
+                        pos.entry_time = datetime.now(timezone.utc)
+                        pos.entry_prob = fill.price
+                        pos.time_remaining_at_entry = time_remaining
+                        self._pending_orders.discard(cid)
+                        print(f"    [PENDING] API verified {mode} — REMOVED cid={cid[:12]}... | pos.size={pos.size:.2f} pos.shares={pos.shares} | pending_orders={[c[:12] for c in self._pending_orders]}")
+                        return
             except Exception as e:
-                print(f"    [API] Error fetching position: {e}")
-                
-            # print(f"    [API] Position not updated yet, retrying in 0.5s...")
+                print(f"    [API] Error verifying {mode}: {e}")
+
             await asyncio.sleep(0.5)
             
-        # Fallback if timeout
-        print(f"    [API] Timeout verifying position, using fill size: {fill.size}")
-        pos.shares = fill.size
-        pos.size = pos.shares * fill.price
-        pos.side = fill.outcome
-        pos.entry_price = fill.price
-        pos.entry_time = datetime.now(timezone.utc)
-        pos.entry_prob = fill.price
-        pos.time_remaining_at_entry = time_remaining
-        print(f"    [FILL] OPEN {pos.asset} {pos.side} {pos.shares} shares @ {fill.price} (${pos.size})")
+        # Timeout: no position update — exit for debug (do not discard; would allow orders without real position)
+        print(f"    [API] Timeout verifying {mode}, using fill size: {fill.size} — EXIT for debug")
+        import sys
+        sys.exit(0)
 
     def _on_fill(self, fill: FillData):
         """Update positions from User Channel fill (status MATCHED)."""
@@ -503,23 +484,12 @@ class TradingEngine:
         state = self.states.get(cid)
         time_remaining = state.time_remaining if state else 0.0
 
-        # Clear pending order when fill received (BUY or SELL)
-        self._pending_orders.discard(fill.asset_id)
-
         if fill.side == "BUY":
-            # Launch async task to verify position without blocking
-            asyncio.create_task(self._update_position_from_api(fill, pos, time_remaining))
+            print(f"    [FILL] BUY received — cid={cid[:12]}... token={fill.asset_id[:12]}... | pending_orders={[c[:12] for c in self._pending_orders]}")
+            asyncio.create_task(self._update_position_from_api(fill, cid, pos, time_remaining))
         else:
-            if pos.shares <= 0 and pos.size <= 0:
-                return
-            close_side = fill.outcome
-            pnl = (fill.price - pos.entry_price) * fill.size
-            self._record_trade(pos, fill.price, pnl, f"CLOSE {close_side}", cid=cid)
-            self.pending_rewards[cid] = pnl
-            pos.size = 0
-            pos.side = None
-            pos.shares = 0
-            print(f"    [FILL] CLOSE {pos.asset} {fill.outcome} {fill.size} shares @ {fill.price} | PnL: ${pnl:+.2f}")
+            print(f"    [FILL] SELL received — cid={cid[:12]}... token={fill.asset_id[:12]}... | pending_orders={[c[:12] for c in self._pending_orders]}")
+            asyncio.create_task(self._update_position_from_api(fill, cid, pos, time_remaining, expect_closed=True))
 
     def close_all_positions(self):
         """Close all positions at current prices (in-memory only; live positions need SELL order)."""
@@ -789,7 +759,7 @@ class TradingEngine:
             pos = self.positions.get(cid)
             if state:
                 mins_left = (m.end_time - now).total_seconds() / 60
-                pos_str = f"{pos.side} ${pos.size:.0f}" if pos and (pos.size > 0 or pos.shares > 0) else "FLAT"
+                pos_str = f"{pos.side} ${pos.size:.3f} {pos.shares}" if pos and (pos.size > 0 or pos.shares > 0) else "FLAT"
                 vel = state._velocity()
                 print(f"  {m.asset}: prob={state.prob:.3f} vel={vel:+.3f} | {pos_str} | {mins_left:.1f}m")
 
@@ -866,7 +836,7 @@ class TradingEngine:
             # Save RL model if training
             if isinstance(self.strategy, RLStrategy) and self.strategy.training:
                 self.strategy.save("rl_model")
-                print("  [RL] Model saved to rl_model.pt / rl_model.safetensors (+ _stats.npz)")
+                print("  [RL] Model saved to rl_model.safetensors (+ _stats.npz)")
 
 
 async def main():
