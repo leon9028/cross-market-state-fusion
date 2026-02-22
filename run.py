@@ -108,6 +108,9 @@ class TradingEngine:
         self.win_count = 0
         # Action distribution: [HOLD, BUY, SELL] per Action.value
         self.action_counts = [0, 0, 0]
+        # Entry spread_pct at each open (for final stats). Live: filled from _pending_entry_spread_pct on fill.
+        self.entry_spread_pcts: List[float] = []
+        self._pending_entry_spread_pct: Dict[str, float] = {}
 
         # Pending rewards for RL (set on position close)
         self.pending_rewards: Dict[str, float] = {}
@@ -245,6 +248,8 @@ class TradingEngine:
                 size_shares = float(round(size_shares))
                 if size_shares < 1.0 / order_price:
                     return
+                _spread_pct = state.spread / max(0.01, state.prob) if state.prob > 0 else 0.0
+                self._pending_entry_spread_pct[cid] = _spread_pct
                 print(f"    [LIVE] SUBMIT OPEN UP {pos.asset} ({size_label}) BUY {size_shares} shares @ {order_price} (${trade_amount})")
                 create_and_submit_order(
                     self.clob_client, token_id, "BUY", order_price, size_shares, order_type=OrderType.FOK
@@ -259,6 +264,8 @@ class TradingEngine:
                 size_shares = float(round(size_shares))
                 if size_shares < 1.0 / order_price:
                     return
+                _spread_pct = state.spread / max(0.01, state.prob) if state.prob > 0 else 0.0
+                self._pending_entry_spread_pct[cid] = _spread_pct
                 print(f"    [LIVE] SUBMIT OPEN DOWN {pos.asset} ({size_label}) BUY {size_shares} shares @ {order_price} (${trade_amount})")
                 create_and_submit_order(
                     self.clob_client, token_id, "BUY", order_price, size_shares, order_type=OrderType.FOK
@@ -324,6 +331,8 @@ class TradingEngine:
                 pos.entry_time = datetime.now(timezone.utc)
                 pos.entry_prob = order_price
                 pos.time_remaining_at_entry = state.time_remaining
+                _spread_pct = state.spread / max(0.01, state.prob) if state.prob > 0 else 0.0
+                self.entry_spread_pcts.append(_spread_pct)
                 print(f"    [Training] OPEN UP {pos.asset} ({size_label}) {pos.shares} shares @ {order_price:.3f}")
                 emit_trade(f"BUY_{size_label}", pos.asset, pos.size)
             elif action.is_sell:
@@ -338,6 +347,8 @@ class TradingEngine:
                 pos.entry_time = datetime.now(timezone.utc)
                 pos.entry_prob = order_price
                 pos.time_remaining_at_entry = state.time_remaining
+                _spread_pct = state.spread / max(0.01, state.prob) if state.prob > 0 else 0.0
+                self.entry_spread_pcts.append(_spread_pct)
                 print(f"    [Training] OPEN DOWN {pos.asset} ({size_label}) {pos.shares} shares @ {order_price:.3f}")
                 emit_trade(f"SELL_{size_label}", pos.asset, pos.size)
 
@@ -486,6 +497,7 @@ class TradingEngine:
                         pos.entry_time = datetime.now(timezone.utc)
                         pos.entry_prob = fill.price
                         pos.time_remaining_at_entry = time_remaining
+                        self.entry_spread_pcts.append(self._pending_entry_spread_pct.pop(cid, 0.0))
                         self._pending_orders.discard(cid)
                         print(f"    [PENDING] API verified {mode} — REMOVED cid={cid[:12]}... | pos.size={pos.size:.2f} pos.shares={pos.shares} | pending_orders={[c[:12] for c in self._pending_orders]}")
                         return
@@ -834,6 +846,23 @@ class TradingEngine:
             pct = 100.0 * self.action_counts[i] / total
             print(f"  {name}: {self.action_counts[i]:6d} ({pct:5.1f}%)")
         print(f"  Total decisions: {total}")
+        self._print_entry_spread_stats()
+
+    def _print_entry_spread_stats(self):
+        """Print entry spread_pct (spread/prob at open) statistics."""
+        if not self.entry_spread_pcts:
+            return
+        n = len(self.entry_spread_pcts)
+        mean = sum(self.entry_spread_pcts) / n
+        min_s = min(self.entry_spread_pcts)
+        max_s = max(self.entry_spread_pcts)
+        # Approx std
+        var = sum((x - mean) ** 2 for x in self.entry_spread_pcts) / n
+        std = (var ** 0.5) if var >= 0 else 0.0
+        print("\n--- Entry spread_pct (at open) ---")
+        print(f"  Opens: {n}")
+        print(f"  Mean:  {mean:.4f}  Min: {min_s:.4f}  Max: {max_s:.4f}  Std: {std:.4f}")
+        print("  (spread_pct = spread / prob)")
 
     async def run(self):
         """Run the trading engine."""
