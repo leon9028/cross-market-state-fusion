@@ -106,6 +106,8 @@ class TradingEngine:
         self.total_pnl = 0.0
         self.trade_count = 0
         self.win_count = 0
+        # Action distribution: [HOLD, BUY, SELL] per Action.value
+        self.action_counts = [0, 0, 0]
 
         # Pending rewards for RL (set on position close)
         self.pending_rewards: Dict[str, float] = {}
@@ -673,6 +675,7 @@ class TradingEngine:
 
                 # Get action from strategy
                 action = self.strategy.act(state)
+                self.action_counts[action.value] += 1
 
                 # RL: Store experience EVERY tick (dense learning signal)
                 if isinstance(self.strategy, RLStrategy) and self.strategy.training:
@@ -818,6 +821,19 @@ class TradingEngine:
         print(f"Total PnL: ${self.total_pnl:+.2f}")
         print(f"Trades: {self.trade_count}")
         print(f"Win Rate: {self.win_count / max(1, self.trade_count) * 100:.1f}%")
+        self._print_action_stats()
+
+    def _print_action_stats(self):
+        """Print action distribution (HOLD / BUY / SELL) over the run."""
+        total = sum(self.action_counts)
+        if total == 0:
+            return
+        names = ["HOLD", "BUY", "SELL"]
+        print("\n--- Action distribution ---")
+        for i, name in enumerate(names):
+            pct = 100.0 * self.action_counts[i] / total
+            print(f"  {name}: {self.action_counts[i]:6d} ({pct:5.1f}%)")
+        print(f"  Total decisions: {total}")
 
     async def run(self):
         """Run the trading engine."""
