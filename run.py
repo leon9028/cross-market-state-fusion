@@ -120,6 +120,9 @@ class TradingEngine:
         # Prevents any new order for a market while a previous order is being processed
         self._pending_orders: set = set()  # Set of condition_ids with pending orders
 
+        # Paper: delay 5s before applying open (simulate _update_position_from_api wait)
+        self._pending_paper_opens: Dict[str, dict] = {}  # cid -> open payload for _delayed_apply_paper_open
+
         # Logger (for RL training)
         self.logger = get_logger() if isinstance(strategy, RLStrategy) else None
 
@@ -285,6 +288,9 @@ class TradingEngine:
         ob_up = self.orderbook_streamer.get_orderbook(cid, "UP")
         ob_down = self.orderbook_streamer.get_orderbook(cid, "DOWN")
 
+        if cid in self._pending_paper_opens.keys():
+            return
+
         # Close existing position: SELL uses stored shares (from User Channel matched message)
         if pos.size > 0 or pos.shares > 0:
             # Use pos.shares (filled shares from User Channel); fallback to size/entry_price for paper/migration
@@ -317,40 +323,77 @@ class TradingEngine:
                 pos.shares = 0
                 return
 
-        # Open new position: BUY token_id. API expects size in shares; notional = size * price >= $1.
-        if pos.size == 0:
+        # Open new position: delay 5s then update pos (simulate live fill wait)
+        if pos.size == 0 and (pos.shares == 0 or pos.shares is None):
             if action.is_buy:
-                pos.side = "UP"
                 if not ob_up.best_ask:
                     return
                 order_price = ob_up.best_ask
-                pos.shares = float(round(trade_amount / order_price))
-                pos.size = pos.shares * order_price
-                pos.entry_price = order_price
-                pos.entry_mid_price = price
-                pos.entry_time = datetime.now(timezone.utc)
-                pos.entry_prob = order_price
-                pos.time_remaining_at_entry = state.time_remaining
+                shares = float(round(trade_amount / order_price))
+                size = shares * order_price
                 _spread_pct = state.spread / max(0.01, state.prob) if state.prob > 0 else 0.0
-                self.entry_spread_pcts.append(_spread_pct)
-                print(f"    [Training] OPEN UP {pos.asset} ({size_label}) {pos.shares} shares @ {order_price:.3f}")
-                emit_trade(f"BUY_{size_label}", pos.asset, pos.size)
+                self._pending_paper_opens[cid] = {
+                    "side": "UP",
+                    "shares": shares,
+                    "size": size,
+                    "entry_price": order_price,
+                    "entry_mid_price": price,
+                    "entry_time": datetime.now(timezone.utc),
+                    "entry_prob": order_price,
+                    "time_remaining_at_entry": state.time_remaining,
+                    "spread_pct": _spread_pct,
+                    "size_label": size_label,
+                    "emit_label": f"BUY_{size_label}",
+                    "order_price": order_price,
+                }
+                asyncio.get_running_loop().create_task(self._delayed_apply_paper_open(cid))
+                print(f"    [Training] OPEN UP {pos.asset} ({size_label}) {shares} shares @ {order_price:.3f} (applying in 5s)")
             elif action.is_sell:
-                pos.side = "DOWN"
                 if not ob_down.best_ask:
                     return
                 order_price = ob_down.best_ask
-                pos.shares = float(round(trade_amount / order_price))
-                pos.size = pos.shares * order_price
-                pos.entry_price = order_price
-                pos.entry_mid_price = 1 - price
-                pos.entry_time = datetime.now(timezone.utc)
-                pos.entry_prob = order_price
-                pos.time_remaining_at_entry = state.time_remaining
+                shares = float(round(trade_amount / order_price))
+                size = shares * order_price
                 _spread_pct = state.spread / max(0.01, state.prob) if state.prob > 0 else 0.0
-                self.entry_spread_pcts.append(_spread_pct)
-                print(f"    [Training] OPEN DOWN {pos.asset} ({size_label}) {pos.shares} shares @ {order_price:.3f}")
-                emit_trade(f"SELL_{size_label}", pos.asset, pos.size)
+                self._pending_paper_opens[cid] = {
+                    "side": "DOWN",
+                    "shares": shares,
+                    "size": size,
+                    "entry_price": order_price,
+                    "entry_mid_price": 1 - price,
+                    "entry_time": datetime.now(timezone.utc),
+                    "entry_prob": order_price,
+                    "time_remaining_at_entry": state.time_remaining,
+                    "spread_pct": _spread_pct,
+                    "size_label": size_label,
+                    "emit_label": f"SELL_{size_label}",
+                    "order_price": order_price,
+                }
+                asyncio.get_running_loop().create_task(self._delayed_apply_paper_open(cid))
+                print(f"    [Training] OPEN DOWN {pos.asset} ({size_label}) {shares} shares @ {order_price:.3f} (applying in 5s)")
+
+    async def _delayed_apply_paper_open(self, cid: str):
+        """After 5s delay, apply pending paper open to pos (simulate live fill delay)."""
+        await asyncio.sleep(5)
+        payload = self._pending_paper_opens.pop(cid, None)
+        if not payload:
+            return
+        pos = self.positions.get(cid)
+        if not pos:
+            return
+        pos.side = payload["side"]
+        pos.shares = payload["shares"]
+        pos.size = payload["size"]
+        pos.entry_price = payload["entry_price"]
+        pos.entry_mid_price = payload["entry_mid_price"]
+        pos.entry_time = payload["entry_time"]
+        pos.entry_prob = payload["entry_prob"]
+        pos.time_remaining_at_entry = payload["time_remaining_at_entry"]
+        self.entry_spread_pcts.append(payload["spread_pct"])
+        size_label = payload["size_label"]
+        order_price = payload["order_price"]
+        print(f"    [Training] APPLIED OPEN {pos.asset} {pos.side} ({size_label}) {pos.shares} shares @ {order_price:.3f}")
+        emit_trade(payload["emit_label"], pos.asset, pos.size)
 
     # def _execute_paper_action(
     #     self, cid: str, pos, action: Action, state: MarketState,
