@@ -172,6 +172,11 @@ class MarketState:
         return self.time_remaining < 0.133  # < 2 min
 
     @property
+    def one_minute_to_close(self) -> bool:
+        """Within 1 min of market end (no new opens)."""
+        return self.time_remaining < 60 / 900  # 60 sec / 900 sec
+
+    @property
     def very_near_expiry(self) -> bool:
         return self.time_remaining < 0.033  # < 30 sec
 

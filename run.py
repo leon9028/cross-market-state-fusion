@@ -676,14 +676,12 @@ class TradingEngine:
                     state.position_side = None
                     state.position_pnl = 0.0
 
-                # For non-RL strategies, force close near expiry as safety
-                # For RL, let it learn to close on its own (gets penalty at expiry)
+                # Force close at 30 sec to expiry (all strategies including RL)
                 if pos and (pos.size > 0 or pos.shares > 0) and state.very_near_expiry:
-                    if not isinstance(self.strategy, RLStrategy):
-                        print(f"    ⏰ EARLY CLOSE: {pos.asset}")
-                        close_action = Action.SELL if pos.side == "UP" else Action.BUY
-                        self.execute_action(cid, close_action, state)
-                        continue
+                    print(f"    ⏰ EARLY CLOSE: {pos.asset}")
+                    close_action = Action.SELL if pos.side == "UP" else Action.BUY
+                    self.execute_action(cid, close_action, state)
+                    continue
 
                 # Get action from strategy
                 action = self.strategy.act(state)
@@ -699,6 +697,12 @@ class TradingEngine:
 
                     # Deep copy state for next iteration
                     self.prev_states[cid] = copy.deepcopy(state)
+
+                # No new opens within 1 min of close (all strategies)
+                if state.one_minute_to_close and action != Action.HOLD:
+                    has_pos = pos and (pos.size > 0 or pos.shares > 0)
+                    if not has_pos:
+                        continue  # forbid opening; allow closing
 
                 # Execute
                 if action != Action.HOLD:
