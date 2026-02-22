@@ -802,7 +802,8 @@ class TradingEngine:
                 mins_left = (m.end_time - now).total_seconds() / 60
                 pos_str = f"{pos.side} ${pos.size:.3f} {pos.shares}" if pos and (pos.size > 0 or pos.shares > 0) else "FLAT"
                 vel = state._velocity()
-                print(f"  {m.asset}: prob={state.prob:.3f} vel={vel:+.3f} | {pos_str} | {mins_left:.1f}m")
+                pnl_str = f" PnL: ${state.position_pnl:+.2f}" if pos and (pos.size > 0 or pos.shares > 0) else ""
+                print(f"  {m.asset}: prob={state.prob:.3f} vel={vel:+.3f} | {pos_str}{pnl_str} | {mins_left:.1f}m")
 
                 # Dashboard data
                 dashboard_markets[cid] = {
