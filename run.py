@@ -73,10 +73,11 @@ class TradingEngine:
     Use --live to place real orders via CLOB; positions then update from User Channel fills.
     """
 
-    def __init__(self, strategy: Strategy, trade_size: float = 10.0, live: bool = False):
+    def __init__(self, strategy: Strategy, trade_size: float = 10.0, live: bool = False, stop_loss_pct: float = 0.15):
         self.strategy = strategy
         self.trade_size = trade_size
         self.live = live
+        self.stop_loss_pct = stop_loss_pct  # Force close when position loss >= this fraction of position size (e.g. 0.15 = 15%)
         self.clob_client = None
         if live:
             try:
@@ -719,6 +720,21 @@ class TradingEngine:
                     state.position_side = None
                     state.position_pnl = 0.0
 
+                # Stop-loss: force close if position loss exceeds threshold (% of position size)
+                if pos and pos.size > 0 and self.stop_loss_pct > 0:
+                    loss_pct = -state.position_pnl / pos.size
+                    if loss_pct >= self.stop_loss_pct:
+                        print(f"    🛑 STOP-LOSS: {pos.asset} loss {loss_pct:.1%} >= {self.stop_loss_pct:.0%}")
+                        close_action = Action.SELL if pos.side == "UP" else Action.BUY
+                        if isinstance(self.strategy, RLStrategy) and self.strategy.training:
+                            prev_state = self.prev_states.get(cid)
+                            if prev_state:
+                                step_reward = self._compute_step_reward(cid, state, close_action, pos)
+                                self.strategy.store(prev_state, close_action, step_reward, state, done=False)
+                            self.prev_states[cid] = copy.deepcopy(state)
+                        self.execute_action(cid, close_action, state)
+                        continue
+
                 # Force close at 30 sec to expiry (all strategies including RL)
                 if pos and (pos.size > 0 or pos.shares > 0) and state.very_near_expiry:
                     print(f"    ⏰ EARLY CLOSE: {pos.asset}")
@@ -968,6 +984,7 @@ async def main():
     parser.add_argument("--dashboard", action="store_true", help="Enable web dashboard")
     parser.add_argument("--port", type=int, default=5050, help="Dashboard port")
     parser.add_argument("--live", action="store_true", help="Place real orders via CLOB (requires .env: PK, FUNDER, CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE)")
+    parser.add_argument("--stop-loss", type=float, default=0.15, metavar="PCT", help="Force close when position loss >= this fraction (default 0.15 = 15%%. Use 0 to disable)")
 
     args = parser.parse_args()
 
@@ -1010,7 +1027,7 @@ async def main():
             strategy.eval()
 
     # Run
-    engine = TradingEngine(strategy, trade_size=args.size, live=args.live)
+    engine = TradingEngine(strategy, trade_size=args.size, live=args.live, stop_loss_pct=args.stop_loss)
     if args.live:
         print("\n*** LIVE MODE: real orders will be sent to Polymarket ***\n")
     await engine.run()
