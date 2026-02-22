@@ -332,7 +332,7 @@ class TradingEngine:
                 order_price = ob_up.best_ask
                 shares = float(round(trade_amount / order_price))
                 size = shares * order_price
-                _spread_pct = state.spread / max(0.01, state.prob) if state.prob > 0 else 0.0
+                _spread_pct = state.spread / max(0.01, state.prob)
                 self._pending_paper_opens[cid] = {
                     "side": "UP",
                     "shares": shares,
@@ -355,7 +355,7 @@ class TradingEngine:
                 order_price = ob_down.best_ask
                 shares = float(round(trade_amount / order_price))
                 size = shares * order_price
-                _spread_pct = state.spread / max(0.01, state.prob) if state.prob > 0 else 0.0
+                _spread_pct = state.spread / max(0.01, 1 - state.prob)
                 self._pending_paper_opens[cid] = {
                     "side": "DOWN",
                     "shares": shares,
@@ -744,6 +744,17 @@ class TradingEngine:
 
                 # Get action from strategy
                 action = self.strategy.act(state)
+
+                # No open when spread > 5% (overwrite BUY/SELL to HOLD for new positions)
+                has_pos = pos and (pos.size > 0 or pos.shares > 0)
+                if not has_pos and action != Action.HOLD:
+                    if action == Action.BUY:
+                        spread_pct = state.spread / max(0.01, state.prob)
+                    else:
+                        spread_pct = state.spread / max(0.01, 1 - state.prob)
+                    if spread_pct > 0.03:
+                        action = Action.HOLD
+
                 self.action_counts[action.value] += 1
 
                 # RL: Store experience EVERY tick (dense learning signal)
