@@ -106,18 +106,18 @@ class RLStrategy(Strategy):
         critic_hidden_size: int = 96,
         history_len: int = 5,
         temporal_dim: int = 32,
-        lr_actor: float = 3e-5,  # Lower for stability with stop-loss (was 5e-5)
+        lr_actor: float = 2e-5,  # Very low for KL stability with stop-loss
         lr_critic: float = 1.5e-4,
         gamma: float = 0.95,
         gae_lambda: float = 0.95,
-        clip_epsilon: float = 0.15,  # Tighter clip for stability with stop-loss (was 0.2)
+        clip_epsilon: float = 0.1,  # Tight clip to limit policy change per step
         entropy_coef: float = 0.03,  # Lower entropy to allow sparse policy (mostly HOLD)
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         buffer_size: int = 256,
         batch_size: int = 64,
         n_epochs: int = 10,
-        target_kl: float = 0.04,  # Allow more change per update when learning stop-loss (was 0.02)
+        target_kl: float = 0.06,  # Higher so early stop triggers less often
     ):
         super().__init__("rl")
         # Low-memory override: set RL_BUFFER_SIZE and/or RL_BATCH_SIZE (e.g. 128, 32) when <2GB RAM

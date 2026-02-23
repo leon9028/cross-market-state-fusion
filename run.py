@@ -73,11 +73,11 @@ class TradingEngine:
     Use --live to place real orders via CLOB; positions then update from User Channel fills.
     """
 
-    def __init__(self, strategy: Strategy, trade_size: float = 10.0, live: bool = False, stop_loss_pct: float = 0.15):
+    def __init__(self, strategy: Strategy, trade_size: float = 10.0, live: bool = False, stop_loss_pct: float = 0.20):
         self.strategy = strategy
         self.trade_size = trade_size
         self.live = live
-        self.stop_loss_pct = stop_loss_pct  # Force close when position loss >= this fraction of position size (e.g. 0.15 = 15%)
+        self.stop_loss_pct = stop_loss_pct  # Force close when position loss >= this fraction (e.g. 0.20 = 20%). Looser default = fewer forced closes, more room for RL to learn.
         self.clob_client = None
         if live:
             try:
@@ -375,7 +375,7 @@ class TradingEngine:
 
     async def _delayed_apply_paper_open(self, cid: str):
         """After 5s delay, apply pending paper open to pos (simulate live fill delay)."""
-        await asyncio.sleep(5)
+        await asyncio.sleep(2)
         payload = self._pending_paper_opens.pop(cid, None)
         if not payload:
             return
@@ -995,7 +995,7 @@ async def main():
     parser.add_argument("--dashboard", action="store_true", help="Enable web dashboard")
     parser.add_argument("--port", type=int, default=5050, help="Dashboard port")
     parser.add_argument("--live", action="store_true", help="Place real orders via CLOB (requires .env: PK, FUNDER, CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE)")
-    parser.add_argument("--stop-loss", type=float, default=0.15, metavar="PCT", help="Force close when position loss >= this fraction (default 0.15 = 15%%. Use 0 to disable)")
+    parser.add_argument("--stop-loss", type=float, default=0.20, metavar="PCT", help="Force close when position loss >= this fraction (default 0.20 = 20%%. Use 0 to disable)")
 
     args = parser.parse_args()
 
