@@ -112,9 +112,13 @@ class TradingEngine:
         self.entry_spread_pcts: List[float] = []
         self._pending_entry_spread_pct: Dict[str, float] = {}
 
-        # Pending rewards for RL (set on position close)
+        # Pending rewards for RL (old event-based reward; kept for compatibility)
         self.pending_rewards: Dict[str, float] = {}
         self.pending_mid_rewards: Dict[str, float] = {}
+
+        # Per-tick reward: track previous mark-to-market PnL per market (unrealized only for now)
+        # reward_t = position_pnl_t - position_pnl_{t-1}
+        self._prev_position_pnl: Dict[str, float] = {}
 
         # Live: track pending orders at market (cid) level until position is verified
         # Prevents any new order for a market while a previous order is being processed
@@ -477,24 +481,18 @@ class TradingEngine:
             )
 
     def _compute_step_reward(self, cid: str, state: 'MarketState', action: 'Action', pos: 'Position') -> float:
-        """Compute reward signal for RL training - Blended Reward."""
-        
-        # 1. 拿出真實的 PnL (含價差，通常會是負數)
-        real_pnl = self.pending_rewards.pop(cid, 0.0)
-        
-        # 2. 拿出理論的 PnL (純方向預測，無價差)
-        mid_pnl = self.pending_mid_rewards.pop(cid, 0.0)
-            
-        # 3. 混合公式 (Reward Shaping)
-        # alpha 係數控制「安慰獎」的比例。0.2 代表給予 20% 的方向正確獎勵
-        alpha = 0.2
-        
-        # 例如：價差賠了 -0.05，但方向對了理論賺 +0.10
-        # total_reward = -0.05 + (0.2 * 0.10) = -0.03
-        # 雖然還是懲罰，但比原本的 -0.05 輕微，告訴模型「方向是對的」
-        total_reward = real_pnl + (alpha * mid_pnl)
-        
-        return total_reward
+        """Per-tick reward: change in unrealized PnL since last tick for this market.
+
+        reward_t = position_pnl_t - position_pnl_{t-1}
+
+        - 正值：這一小段時間內 mark-to-market PnL 有改善（價格往有利方向動，或平掉虧損倉）
+        - 負值：這一小段時間內 PnL 惡化（一直抱虧損倉會持續吃負 reward）
+        """
+        prev_pnl = self._prev_position_pnl.get(cid, 0.0)
+        curr_pnl = state.position_pnl
+        reward = curr_pnl - prev_pnl
+        self._prev_position_pnl[cid] = curr_pnl
+        return reward
 
     def _resolve_condition_id(self, raw_cid: str) -> Optional[str]:
         """Resolve fill condition_id to engine's position key (0x or no-0x)."""
@@ -619,6 +617,9 @@ class TradingEngine:
                         del self.prev_states[cid]
 
                 del self.markets[cid]
+                # Reset per-tick PnL baseline for this market
+                if cid in self._prev_position_pnl:
+                    del self._prev_position_pnl[cid]
 
             if not self.markets:
                 print("\nAll markets expired. Refreshing...")
