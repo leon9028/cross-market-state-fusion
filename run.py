@@ -116,9 +116,13 @@ class TradingEngine:
         self.pending_rewards: Dict[str, float] = {}
         self.pending_mid_rewards: Dict[str, float] = {}
 
-        # Per-tick reward: track previous mark-to-market PnL per market (unrealized only for now)
-        # reward_t = position_pnl_t - position_pnl_{t-1}
-        self._prev_position_pnl: Dict[str, float] = {}
+        # Per-tick reward baseline:
+        #   B_t = realized_pnl[cid] + alpha * unrealized_pnl[cid]
+        #   reward_t = B_t - B_{t-1}
+        # _realized_pnl[cid]  : sum of realized PnL from all closes for this market
+        # _baseline_pnl[cid]  : previous B_t used to compute per-tick reward
+        self._realized_pnl: Dict[str, float] = {}
+        self._baseline_pnl: Dict[str, float] = {}
 
         # RL interval stats: per-buffer close PnL distribution
         # Reset on each PPO update; filled by _record_trade when RL training is active.
@@ -455,6 +459,9 @@ class TradingEngine:
         self.trade_count += 1
         if pnl > 0:
             self.win_count += 1
+        # Track realized PnL per market for per-tick baseline (B_t)
+        if cid is not None:
+            self._realized_pnl[cid] = self._realized_pnl.get(cid, 0.0) + pnl
         # When RL training is active, track close PnL for this PPO interval
         if isinstance(self.strategy, RLStrategy) and getattr(self.strategy, "training", False):
             self._interval_close_pnls.append(pnl)
@@ -488,17 +495,29 @@ class TradingEngine:
             )
 
     def _compute_step_reward(self, cid: str, state: 'MarketState', action: 'Action', pos: 'Position') -> float:
-        """Per-tick reward: change in unrealized PnL since last tick for this market.
+        """Per-tick reward based on change in blended realized/unrealized PnL.
 
-        reward_t = position_pnl_t - position_pnl_{t-1}
+        定義:
+            R_t = 已實現 PnL (realized) for this market (累積所有平倉)
+            U_t = 未實現 PnL (unrealized) = state.position_pnl
+            B_t = R_t + alpha * U_t
+            reward_t = B_t - B_{t-1}
 
-        - 正值：這一小段時間內 mark-to-market PnL 有改善（價格往有利方向動，或平掉虧損倉）
-        - 負值：這一小段時間內 PnL 惡化（一直抱虧損倉會持續吃負 reward）
+        直覺:
+        - HOLD 贏錢倉: 價格往有利方向走 → U_t 上升 → reward_t > 0 (但被 alpha 折扣)
+        - HOLD 虧損倉: 價格對你不利 → U_t 更負 → reward_t < 0，持續被懲罰
+        - 平倉實現獲利: U_t 從正值跳回 0，R_t 累加 → B_t 從 alpha*U 跳到 1*U，多出 (1-alpha)*U 的正 spike
         """
-        prev_pnl = self._prev_position_pnl.get(cid, 0.0)
-        curr_pnl = state.position_pnl
-        reward = curr_pnl - prev_pnl
-        self._prev_position_pnl[cid] = curr_pnl
+        alpha = 0.3  # realized PnL 比 unrealized PnL 權重大
+
+        realized = self._realized_pnl.get(cid, 0.0)
+        unrealized = state.position_pnl
+
+        prev_baseline = self._baseline_pnl.get(cid, 0.0)
+        baseline = realized + alpha * unrealized
+        reward = baseline - prev_baseline
+
+        self._baseline_pnl[cid] = baseline
         return reward
 
     def _resolve_condition_id(self, raw_cid: str) -> Optional[str]:
@@ -625,8 +644,10 @@ class TradingEngine:
 
                 del self.markets[cid]
                 # Reset per-tick PnL baseline for this market
-                if cid in self._prev_position_pnl:
-                    del self._prev_position_pnl[cid]
+                if cid in self._baseline_pnl:
+                    del self._baseline_pnl[cid]
+                if cid in self._realized_pnl:
+                    del self._realized_pnl[cid]
 
             if not self.markets:
                 print("\nAll markets expired. Refreshing...")
