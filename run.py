@@ -120,6 +120,10 @@ class TradingEngine:
         # reward_t = position_pnl_t - position_pnl_{t-1}
         self._prev_position_pnl: Dict[str, float] = {}
 
+        # RL interval stats: per-buffer close PnL distribution
+        # Reset on each PPO update; filled by _record_trade when RL training is active.
+        self._interval_close_pnls: List[float] = []
+
         # Live: track pending orders at market (cid) level until position is verified
         # Prevents any new order for a market while a previous order is being processed
         self._pending_orders: set = set()  # Set of condition_ids with pending orders
@@ -451,6 +455,9 @@ class TradingEngine:
         self.trade_count += 1
         if pnl > 0:
             self.win_count += 1
+        # When RL training is active, track close PnL for this PPO interval
+        if isinstance(self.strategy, RLStrategy) and getattr(self.strategy, "training", False):
+            self._interval_close_pnls.append(pnl)
         print(f"    {action} {pos.asset} @ {price:.3f} | PnL: ${pnl:+.2f}")
         # Emit to dashboard
         emit_trade(action, pos.asset, pos.size, pnl)
@@ -775,6 +782,12 @@ class TradingEngine:
                     buffer_rewards = [exp.reward for exp in self.strategy.experiences]
                     metrics = self.strategy.update()
                     if metrics:
+                        # Per-buffer close PnL stats (only trades that happened since last update)
+                        if self._interval_close_pnls:
+                            n_trades = len(self._interval_close_pnls)
+                            avg_trade_pnl = sum(self._interval_close_pnls) / n_trades
+                            print(f"  [RL] interval trades={n_trades} avg_close_pnl={avg_trade_pnl:+.4f}")
+                            self._interval_close_pnls = []
                         print(f"  [RL] loss={metrics['policy_loss']:.4f} "
                               f"v_loss={metrics['value_loss']:.4f} "
                               f"ent={metrics['entropy']:.3f} "
