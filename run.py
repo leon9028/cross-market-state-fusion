@@ -720,26 +720,29 @@ class TradingEngine:
                     state.position_side = None
                     state.position_pnl = 0.0
 
-                # Stop-loss: force close if position loss exceeds threshold (% of position size)
+                # Stop-loss: pure risk management (do NOT train RL on this)
                 if pos and pos.size > 0 and self.stop_loss_pct > 0:
                     loss_pct = -state.position_pnl / pos.size
                     if loss_pct >= self.stop_loss_pct:
                         print(f"    🛑 STOP-LOSS: {pos.asset} loss {loss_pct:.1%} >= {self.stop_loss_pct:.0%}")
                         close_action = Action.SELL if pos.side == "UP" else Action.BUY
-                        if isinstance(self.strategy, RLStrategy) and self.strategy.training:
-                            prev_state = self.prev_states.get(cid)
-                            if prev_state:
-                                step_reward = self._compute_step_reward(cid, state, close_action, pos)
-                                self.strategy.store(prev_state, close_action, step_reward, state, done=False)
-                            self.prev_states[cid] = copy.deepcopy(state)
+                        # Execute forced close, but drop its reward from RL training
                         self.execute_action(cid, close_action, state)
+                        self.pending_rewards.pop(cid, None)
+                        self.pending_mid_rewards.pop(cid, None)
+                        if cid in self.prev_states:
+                            del self.prev_states[cid]
                         continue
 
-                # Force close at 30 sec to expiry (all strategies including RL)
+                # Force close at 30 sec to expiry (pure risk management; do NOT train RL)
                 if pos and (pos.size > 0 or pos.shares > 0) and state.very_near_expiry:
                     print(f"    ⏰ EARLY CLOSE: {pos.asset}")
                     close_action = Action.SELL if pos.side == "UP" else Action.BUY
                     self.execute_action(cid, close_action, state)
+                    self.pending_rewards.pop(cid, None)
+                    self.pending_mid_rewards.pop(cid, None)
+                    if cid in self.prev_states:
+                        del self.prev_states[cid]
                     continue
 
                 # Get action from strategy
