@@ -370,7 +370,8 @@ class TradingEngine:
                 order_price = ob_down.best_ask
                 shares = float(round(trade_amount / order_price))
                 size = shares * order_price
-                _spread_pct = state.spread / max(0.01, state.prob) if state.prob > 0 else 0.0
+                down_prob = 1 - state.prob
+                _spread_pct = state.spread / max(0.01, down_prob) if down_prob > 0 else 0.0
                 self._pending_paper_opens[cid] = {
                     "side": "DOWN",
                     "shares": shares,
