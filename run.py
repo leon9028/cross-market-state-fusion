@@ -99,6 +99,10 @@ class TradingEngine:
         self.positions: Dict[str, Position] = {}
         self.states: Dict[str, MarketState] = {}
         self.prev_states: Dict[str, MarketState] = {}  # For RL transitions
+        self._prev_actions: Dict[str, Action] = {}  # action chosen at prev tick per cid
+        self._prev_log_probs: Dict[str, float] = {}
+        self._prev_values: Dict[str, float] = {}
+        self._prev_temporal_states: Dict[str, object] = {}
         self.open_prices: Dict[str, float] = {}  # Binance price at market open
         self.running = False
 
@@ -628,26 +632,30 @@ class TradingEngine:
             for cid in expired:
                 print(f"\n  EXPIRED: {self.markets[cid].asset}")
 
-                # RL: Store terminal experience with final PnL
+                # RL: Store terminal experience using ΔB reward (consistent with per-tick)
                 if isinstance(self.strategy, RLStrategy) and self.strategy.training:
                     state = self.states.get(cid)
                     prev_state = self.prev_states.get(cid)
+                    prev_action = self._prev_actions.get(cid)
                     pos = self.positions.get(cid)
-                    if state and prev_state:
-                        # Terminal reward is the realized PnL
-                        terminal_reward = state.position_pnl if pos and (pos.size > 0 or pos.shares > 0) else 0.0
-                        self.strategy.store(prev_state, Action.HOLD, terminal_reward, state, done=True)
+                    if state and prev_state and prev_action is not None:
+                        terminal_reward = self._compute_step_reward(cid, state, prev_action, pos)
+                        self.strategy.store(
+                            prev_state, prev_action, terminal_reward, state, done=True,
+                            log_prob=self._prev_log_probs.get(cid, 0.0),
+                            value=self._prev_values.get(cid, 0.0),
+                            temporal_state=self._prev_temporal_states.get(cid),
+                        )
 
-                    # Clean up prev_state
-                    if cid in self.prev_states:
-                        del self.prev_states[cid]
+                    self.prev_states.pop(cid, None)
+                    self._prev_actions.pop(cid, None)
+                    self._prev_log_probs.pop(cid, None)
+                    self._prev_values.pop(cid, None)
+                    self._prev_temporal_states.pop(cid, None)
 
                 del self.markets[cid]
-                # Reset per-tick PnL baseline for this market
-                if cid in self._baseline_pnl:
-                    del self._baseline_pnl[cid]
-                if cid in self._realized_pnl:
-                    del self._realized_pnl[cid]
+                self._baseline_pnl.pop(cid, None)
+                self._realized_pnl.pop(cid, None)
 
             if not self.markets:
                 print("\nAll markets expired. Refreshing...")
@@ -753,22 +761,43 @@ class TradingEngine:
                     print(f"    ⏰ EARLY CLOSE: {pos.asset}")
                     close_action = Action.SELL if pos.side == "UP" else Action.BUY
                     self.execute_action(cid, close_action, state)
+                    # Clean up RL per-cid state so the forced close PnL
+                    # doesn't leak into the next experience as a reward spike
+                    self.prev_states.pop(cid, None)
+                    self._prev_actions.pop(cid, None)
+                    self._prev_log_probs.pop(cid, None)
+                    self._prev_values.pop(cid, None)
+                    self._prev_temporal_states.pop(cid, None)
+                    self.pending_rewards.pop(cid, None)
+                    self.pending_mid_rewards.pop(cid, None)
+                    # Sync baseline to current realized so next tick starts clean
+                    self._baseline_pnl[cid] = self._realized_pnl.get(cid, 0.0)
                     continue
 
                 # Get action from strategy
                 action = self.strategy.act(state)
                 self.action_counts[action.value] += 1
 
-                # RL: Store experience EVERY tick (dense learning signal)
+                # RL: Store experience using PREVIOUS tick's (action, log_prob, value)
                 if isinstance(self.strategy, RLStrategy) and self.strategy.training:
                     prev_state = self.prev_states.get(cid)
-                    if prev_state:
-                        step_reward = self._compute_step_reward(cid, state, action, pos)
-                        # Episode not done unless market expired
-                        self.strategy.store(prev_state, action, step_reward, state, done=False)
+                    prev_action = self._prev_actions.get(cid)
+                    if prev_state is not None and prev_action is not None:
+                        step_reward = self._compute_step_reward(cid, state, prev_action, pos)
+                        self.strategy.store(
+                            prev_state, prev_action, step_reward, state, done=False,
+                            log_prob=self._prev_log_probs.get(cid),
+                            value=self._prev_values.get(cid),
+                            temporal_state=self._prev_temporal_states.get(cid),
+                        )
 
-                    # Deep copy state for next iteration
                     self.prev_states[cid] = copy.deepcopy(state)
+                    self._prev_actions[cid] = action
+                    self._prev_log_probs[cid] = self.strategy._last_log_prob
+                    self._prev_values[cid] = self.strategy._last_value
+                    ts = getattr(self.strategy, '_last_temporal_state', None)
+                    if ts is not None:
+                        self._prev_temporal_states[cid] = ts.copy()
 
                 # No new opens within 1 min of close (all strategies)
                 if state.one_minute_to_close and action != Action.HOLD:

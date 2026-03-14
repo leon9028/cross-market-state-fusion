@@ -205,7 +205,11 @@ class RLStrategy(Strategy):
         return Action(action_idx)
 
     def store(self, state: MarketState, action: Action, reward: float,
-              next_state: MarketState, done: bool):
+              next_state: MarketState, done: bool,
+              log_prob: float = None, value: float = None,
+              temporal_state: np.ndarray = None):
+        """When log_prob/value/temporal_state are provided explicitly (per-cid),
+        they take precedence over self._last_* which may belong to a different cid."""
         self.reward_count += 1
         delta = reward - self.reward_mean
         self.reward_mean += delta / self.reward_count
@@ -214,33 +218,28 @@ class RLStrategy(Strategy):
             / max(1, self.reward_count)
         )
 
-        # Normalize reward (same as rl_mlx: mean-centering + scale by std)
         norm_reward = (reward - self.reward_mean) / (self.reward_std + 1e-8)
-
-        # ========== [DEBUG START: 驗證假說] ==========
-        # 條件：實際 PnL 是負的 (賠錢)，但標準化後變成正的 (獎勵)
-        if reward < 0 and norm_reward > 0:
-            print(f"⚠️ [中毒警報] 發生符號翻轉！")
-            print(f"    實際 PnL (Raw): {reward:.6f} (賠錢)")
-            print(f"    平均水準 (Mean): {self.reward_mean:.6f} (大家都在賠)")
-            print(f"    給出的獎勵 (Norm): {norm_reward:.6f} (模型以為這是好事!)")
-            print(f"    原因: 因為你賠得比平均 ({self.reward_mean:.6f}) 少，所以被當成獲利。")
-        # ========== [DEBUG END] ====================
-
 
         next_features = next_state.to_features()
         next_temporal_state = self._get_temporal_state(next_state.asset, next_features)
 
+        _log_prob = log_prob if log_prob is not None else self._last_log_prob
+        _value = value if value is not None else self._last_value
+        _temporal = temporal_state if temporal_state is not None else (
+            self._last_temporal_state if self._last_temporal_state is not None
+            else np.zeros(self.history_len * self.input_dim, dtype=np.float32)
+        )
+
         exp = Experience(
             state=state.to_features(),
-            temporal_state=self._last_temporal_state if self._last_temporal_state is not None else np.zeros(self.history_len * self.input_dim, dtype=np.float32),
+            temporal_state=_temporal,
             action=action.value,
             reward=norm_reward,
             next_state=next_features,
             next_temporal_state=next_temporal_state,
             done=done,
-            log_prob=self._last_log_prob,
-            value=self._last_value,
+            log_prob=_log_prob,
+            value=_value,
         )
         self.experiences.append(exp)
         if len(self.experiences) > self.buffer_size:
@@ -264,20 +263,6 @@ class RLStrategy(Strategy):
         if len(self.experiences) < self.buffer_size:
             return None
 
-        # ========== [DEBUG START: 驗證基準線] ==========
-        print(f"\n--- [RL Update] 檢查數據分佈 ---")
-        print(f"目前全局 Reward Mean: {self.reward_mean:.6f}")
-        
-        # 檢查 Buffer 裡的獎勵情況
-        raw_rewards = np.array([e.reward * (self.reward_std + 1e-8) + self.reward_mean for e in self.experiences])
-        # 注意：因為 experience 裡存的是 norm_reward，這裡嘗試還原一下或是直接看 norm_reward
-        stored_norm_rewards = np.array([e.reward for e in self.experiences])
-        
-        print(f"Buffer 內標準化獎勵 (Norm) -> Max: {stored_norm_rewards.max():.4f}, Min: {stored_norm_rewards.min():.4f}, Mean: {stored_norm_rewards.mean():.4f}")
-        
-        if self.reward_mean < -0.01:
-            print(f"🚨 警告: 全局平均值已變成負數 ({self.reward_mean:.6f})，Mean Centering 機制將開始將「小賠」視為「正獎勵」！")
-        # ========== [DEBUG END] ====================
 
         states = np.array([e.state for e in self.experiences], dtype=np.float32)
         temporal_states = np.array([e.temporal_state for e in self.experiences], dtype=np.float32)
