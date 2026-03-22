@@ -522,6 +522,8 @@ class TradingEngine:
         baseline = realized + alpha * unrealized
         reward = baseline - prev_baseline
 
+        reward = max(-10.0, min(10.0, reward))
+
         self._baseline_pnl[cid] = baseline
         return reward
 
