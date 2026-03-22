@@ -836,16 +836,19 @@ class TradingEngine:
                     metrics = self.strategy.update()
                     if metrics:
                         # Per-buffer close PnL stats (only trades that happened since last update)
+                        avg_close_pnl = 0.0
                         if self._interval_close_pnls:
                             n_trades = len(self._interval_close_pnls)
-                            avg_trade_pnl = sum(self._interval_close_pnls) / n_trades
-                            print(f"  [RL] interval trades={n_trades} avg_close_pnl={avg_trade_pnl:+.4f}")
+                            avg_close_pnl = sum(self._interval_close_pnls) / n_trades
+                            print(f"  [RL] interval trades={n_trades} avg_close_pnl={avg_close_pnl:+.4f}")
                             self._interval_close_pnls = []
                         print(f"  [RL] loss={metrics['policy_loss']:.4f} "
                               f"v_loss={metrics['value_loss']:.4f} "
                               f"ent={metrics['entropy']:.3f} "
                               f"kl={metrics['approx_kl']:.4f} "
-                              f"ev={metrics['explained_variance']:.2f}")
+                              f"ev={metrics['explained_variance']:.2f} "
+                              f"V={metrics['avg_value']:+.3f} "
+                              f"Vrange={metrics['value_range']:.3f}")
                         # Send to dashboard
                         metrics['buffer_size'] = len(self.strategy.experiences)
                         update_rl_metrics(metrics)
@@ -856,7 +859,8 @@ class TradingEngine:
                                 buffer_rewards=buffer_rewards,
                                 cumulative_pnl=self.total_pnl,
                                 cumulative_trades=self.trade_count,
-                                cumulative_wins=self.win_count
+                                cumulative_wins=self.win_count,
+                                avg_close_pnl=avg_close_pnl,
                             )
 
     def _update_dashboard_only(self):

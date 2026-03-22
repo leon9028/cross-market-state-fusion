@@ -379,10 +379,26 @@ class RLStrategy(Strategy):
                 print(f"  [RL] Early stop epoch {epoch}, KL={avg_kl:.4f}")
                 break
 
-        self.experiences.clear()
-
+        # Compute diagnostics before clearing buffer
         var_y = np.var(returns)
         explained_var = 1 - np.var(returns - old_values) / (var_y + 1e-8) if var_y > 0 else 0.0
+
+        raw_adv = returns - old_values
+        avg_advantage = float(np.mean(raw_adv))
+        advantage_std = float(np.std(raw_adv))
+
+        avg_value = float(np.mean(old_values))
+        value_range = float(np.max(old_values) - np.min(old_values))
+
+        action_counts = [0, 0, 0]
+        for a in actions:
+            action_counts[int(a)] += 1
+        total_actions = max(1, sum(action_counts))
+        hold_pct = action_counts[0] / total_actions
+        buy_pct = action_counts[1] / total_actions
+        sell_pct = action_counts[2] / total_actions
+
+        self.experiences.clear()
 
         return {
             "policy_loss": np.mean(all_metrics["policy_loss"]),
@@ -391,6 +407,15 @@ class RLStrategy(Strategy):
             "approx_kl": np.mean(all_metrics["approx_kl"]),
             "clip_fraction": np.mean(all_metrics["clip_fraction"]),
             "explained_variance": explained_var,
+            "avg_value": avg_value,
+            "value_range": value_range,
+            "avg_advantage": avg_advantage,
+            "advantage_std": advantage_std,
+            "reward_mean": self.reward_mean,
+            "reward_std": self.reward_std,
+            "hold_pct": hold_pct,
+            "buy_pct": buy_pct,
+            "sell_pct": sell_pct,
         }
 
     def reset(self):

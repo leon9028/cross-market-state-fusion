@@ -38,8 +38,18 @@ class UpdateRecord:
     approx_kl: float
     clip_fraction: float
     explained_variance: float
+    avg_value: float
+    value_range: float
+    avg_advantage: float
+    advantage_std: float
+    reward_mean: float
+    reward_std: float
+    hold_pct: float
+    buy_pct: float
+    sell_pct: float
     buffer_avg_reward: float
-    buffer_win_rate: float  # % of positive rewards in buffer
+    buffer_win_rate: float
+    avg_close_pnl: float
     cumulative_pnl: float
     cumulative_trades: int
     cumulative_win_rate: float
@@ -108,8 +118,12 @@ class TrainingLogger:
         with open(self.updates_file, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=[
                 'timestamp', 'update_num', 'policy_loss', 'value_loss', 'entropy',
-                'approx_kl', 'clip_fraction', 'explained_variance', 'buffer_avg_reward',
-                'buffer_win_rate', 'cumulative_pnl', 'cumulative_trades', 'cumulative_win_rate'
+                'approx_kl', 'clip_fraction', 'explained_variance',
+                'avg_value', 'value_range', 'avg_advantage', 'advantage_std',
+                'reward_mean', 'reward_std',
+                'hold_pct', 'buy_pct', 'sell_pct',
+                'buffer_avg_reward', 'buffer_win_rate', 'avg_close_pnl',
+                'cumulative_pnl', 'cumulative_trades', 'cumulative_win_rate'
             ])
             writer.writeheader()
 
@@ -173,12 +187,12 @@ class TrainingLogger:
         buffer_rewards: List[float],
         cumulative_pnl: float,
         cumulative_trades: int,
-        cumulative_wins: int
+        cumulative_wins: int,
+        avg_close_pnl: float = 0.0,
     ):
         """Log a PPO update."""
         self.update_count += 1
 
-        # Compute buffer stats
         avg_reward = sum(buffer_rewards) / len(buffer_rewards) if buffer_rewards else 0
         win_rate = sum(1 for r in buffer_rewards if r > 0) / len(buffer_rewards) if buffer_rewards else 0
         cum_win_rate = cumulative_wins / cumulative_trades if cumulative_trades > 0 else 0
@@ -192,11 +206,21 @@ class TrainingLogger:
             approx_kl=metrics.get('approx_kl', 0),
             clip_fraction=metrics.get('clip_fraction', 0),
             explained_variance=metrics.get('explained_variance', 0),
+            avg_value=metrics.get('avg_value', 0),
+            value_range=metrics.get('value_range', 0),
+            avg_advantage=metrics.get('avg_advantage', 0),
+            advantage_std=metrics.get('advantage_std', 0),
+            reward_mean=metrics.get('reward_mean', 0),
+            reward_std=metrics.get('reward_std', 0),
+            hold_pct=metrics.get('hold_pct', 0),
+            buy_pct=metrics.get('buy_pct', 0),
+            sell_pct=metrics.get('sell_pct', 0),
             buffer_avg_reward=avg_reward,
             buffer_win_rate=win_rate,
+            avg_close_pnl=avg_close_pnl,
             cumulative_pnl=cumulative_pnl,
             cumulative_trades=cumulative_trades,
-            cumulative_win_rate=cum_win_rate
+            cumulative_win_rate=cum_win_rate,
         )
 
         self.updates.append(record)
