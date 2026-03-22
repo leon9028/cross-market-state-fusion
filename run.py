@@ -513,7 +513,7 @@ class TradingEngine:
         - HOLD 虧損倉: 價格對你不利 → U_t 更負 → reward_t < 0，持續被懲罰
         - 平倉實現獲利: U_t 從正值跳回 0，R_t 累加 → B_t 從 alpha*U 跳到 1*U，多出 (1-alpha)*U 的正 spike
         """
-        alpha = 0.3  # realized PnL 比 unrealized PnL 權重大
+        alpha = 0.5  # unrealized loss 懲罰更直接 (was 0.3)
 
         realized = self._realized_pnl.get(cid, 0.0)
         unrealized = state.position_pnl
