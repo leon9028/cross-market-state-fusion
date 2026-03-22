@@ -50,6 +50,8 @@ class UpdateRecord:
     buffer_avg_reward: float
     buffer_win_rate: float
     avg_close_pnl: float
+    stoploss_count: int
+    cumulative_stoploss: int
     cumulative_pnl: float
     cumulative_trades: int
     cumulative_win_rate: float
@@ -123,6 +125,7 @@ class TrainingLogger:
                 'reward_mean', 'reward_std',
                 'hold_pct', 'buy_pct', 'sell_pct',
                 'buffer_avg_reward', 'buffer_win_rate', 'avg_close_pnl',
+                'stoploss_count', 'cumulative_stoploss',
                 'cumulative_pnl', 'cumulative_trades', 'cumulative_win_rate'
             ])
             writer.writeheader()
@@ -189,6 +192,8 @@ class TrainingLogger:
         cumulative_trades: int,
         cumulative_wins: int,
         avg_close_pnl: float = 0.0,
+        stoploss_count: int = 0,
+        cumulative_stoploss: int = 0,
     ):
         """Log a PPO update."""
         self.update_count += 1
@@ -218,6 +223,8 @@ class TrainingLogger:
             buffer_avg_reward=avg_reward,
             buffer_win_rate=win_rate,
             avg_close_pnl=avg_close_pnl,
+            stoploss_count=stoploss_count,
+            cumulative_stoploss=cumulative_stoploss,
             cumulative_pnl=cumulative_pnl,
             cumulative_trades=cumulative_trades,
             cumulative_win_rate=cum_win_rate,

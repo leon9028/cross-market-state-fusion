@@ -132,6 +132,11 @@ class TradingEngine:
         # Reset on each PPO update; filled by _record_trade when RL training is active.
         self._interval_close_pnls: List[float] = []
 
+        # External stop-loss: force close when unrealized loss > threshold % of position
+        self.STOP_LOSS_PCT = 0.20  # 20% of position notional
+        self._interval_stoploss_count = 0  # per PPO-update interval (reset each update)
+        self._total_stoploss_count = 0     # cumulative
+
         # Live: track pending orders at market (cid) level until position is verified
         # Prevents any new order for a market while a previous order is being processed
         self._pending_orders: set = set()  # Set of condition_ids with pending orders
@@ -765,8 +770,6 @@ class TradingEngine:
                     print(f"    ⏰ EARLY CLOSE: {pos.asset}")
                     close_action = Action.SELL if pos.side == "UP" else Action.BUY
                     self.execute_action(cid, close_action, state)
-                    # Clean up RL per-cid state so the forced close PnL
-                    # doesn't leak into the next experience as a reward spike
                     self.prev_states.pop(cid, None)
                     self._prev_actions.pop(cid, None)
                     self._prev_log_probs.pop(cid, None)
@@ -774,9 +777,28 @@ class TradingEngine:
                     self._prev_temporal_states.pop(cid, None)
                     self.pending_rewards.pop(cid, None)
                     self.pending_mid_rewards.pop(cid, None)
-                    # Sync baseline to current realized so next tick starts clean
                     self._baseline_pnl[cid] = self._realized_pnl.get(cid, 0.0)
                     continue
+
+                # External stop-loss: force close if unrealized loss > threshold
+                if pos and (pos.size > 0 or pos.shares > 0) and pos.size > 0:
+                    loss_pct = state.position_pnl / pos.size
+                    if loss_pct < -self.STOP_LOSS_PCT:
+                        print(f"    🛑 STOP-LOSS: {pos.asset} loss={loss_pct:.1%} (threshold={-self.STOP_LOSS_PCT:.0%})")
+                        close_action = Action.SELL if pos.side == "UP" else Action.BUY
+                        self.execute_action(cid, close_action, state)
+                        self._interval_stoploss_count += 1
+                        self._total_stoploss_count += 1
+                        # Clean up RL state (same as early close — external rule, not RL)
+                        self.prev_states.pop(cid, None)
+                        self._prev_actions.pop(cid, None)
+                        self._prev_log_probs.pop(cid, None)
+                        self._prev_values.pop(cid, None)
+                        self._prev_temporal_states.pop(cid, None)
+                        self.pending_rewards.pop(cid, None)
+                        self.pending_mid_rewards.pop(cid, None)
+                        self._baseline_pnl[cid] = self._realized_pnl.get(cid, 0.0)
+                        continue
 
                 # Get action from strategy
                 action = self.strategy.act(state)
@@ -850,7 +872,8 @@ class TradingEngine:
                               f"kl={metrics['approx_kl']:.4f} "
                               f"ev={metrics['explained_variance']:.2f} "
                               f"V={metrics['avg_value']:+.3f} "
-                              f"Vrange={metrics['value_range']:.3f}")
+                              f"Vrange={metrics['value_range']:.3f} "
+                              f"SL={self._interval_stoploss_count}")
                         # Send to dashboard
                         metrics['buffer_size'] = len(self.strategy.experiences)
                         update_rl_metrics(metrics)
@@ -863,7 +886,10 @@ class TradingEngine:
                                 cumulative_trades=self.trade_count,
                                 cumulative_wins=self.win_count,
                                 avg_close_pnl=avg_close_pnl,
+                                stoploss_count=self._interval_stoploss_count,
+                                cumulative_stoploss=self._total_stoploss_count,
                             )
+                        self._interval_stoploss_count = 0
 
     def _update_dashboard_only(self):
         """Update dashboard state without printing to console."""
