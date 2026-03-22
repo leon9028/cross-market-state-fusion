@@ -29,6 +29,7 @@ class Experience:
     done: bool
     log_prob: float
     value: float
+    cid: str = ""
 
 
 class TemporalEncoder(nn.Module):
@@ -207,7 +208,8 @@ class RLStrategy(Strategy):
     def store(self, state: MarketState, action: Action, reward: float,
               next_state: MarketState, done: bool,
               log_prob: float = None, value: float = None,
-              temporal_state: np.ndarray = None):
+              temporal_state: np.ndarray = None,
+              cid: str = ""):
         """When log_prob/value/temporal_state are provided explicitly (per-cid),
         they take precedence over self._last_* which may belong to a different cid."""
         self.reward_count += 1
@@ -218,7 +220,7 @@ class RLStrategy(Strategy):
             / max(1, self.reward_count)
         )
 
-        norm_reward = (reward - self.reward_mean) / (self.reward_std + 1e-8)
+        norm_reward = reward / max(1.0, self.reward_std)
 
         next_features = next_state.to_features()
         next_temporal_state = self._get_temporal_state(next_state.asset, next_features)
@@ -240,6 +242,7 @@ class RLStrategy(Strategy):
             done=done,
             log_prob=_log_prob,
             value=_value,
+            cid=cid,
         )
         self.experiences.append(exp)
         if len(self.experiences) > self.buffer_size:
@@ -263,7 +266,7 @@ class RLStrategy(Strategy):
         if len(self.experiences) < self.buffer_size:
             return None
 
-
+        n = len(self.experiences)
         states = np.array([e.state for e in self.experiences], dtype=np.float32)
         temporal_states = np.array([e.temporal_state for e in self.experiences], dtype=np.float32)
         actions = np.array([e.action for e in self.experiences], dtype=np.int64)
@@ -272,15 +275,34 @@ class RLStrategy(Strategy):
         old_log_probs = np.array([e.log_prob for e in self.experiences], dtype=np.float32)
         old_values = np.array([e.value for e in self.experiences], dtype=np.float32)
 
-        next_state = self.experiences[-1].next_state.reshape(1, -1)
-        next_temporal = self.experiences[-1].next_temporal_state.reshape(1, -1)
-        with torch.no_grad():
-            next_value = float(self.critic(
-                torch.from_numpy(next_state).to(self.device),
-                torch.from_numpy(next_temporal).to(self.device)
-            ).cpu().item())
+        # Per-market GAE: group by cid to avoid cross-market TD leakage
+        from collections import defaultdict
+        market_indices = defaultdict(list)
+        for i, exp in enumerate(self.experiences):
+            market_indices[exp.cid].append(i)
 
-        advantages, returns = self._compute_gae(rewards, old_values, dones, next_value)
+        advantages = np.zeros(n, dtype=np.float32)
+        returns = np.zeros(n, dtype=np.float32)
+
+        with torch.no_grad():
+            for cid, indices in market_indices.items():
+                m_rewards = rewards[indices]
+                m_values = old_values[indices]
+                m_dones = dones[indices]
+
+                last_exp = self.experiences[indices[-1]]
+                if last_exp.done:
+                    next_value = 0.0
+                else:
+                    ns = torch.from_numpy(last_exp.next_state.reshape(1, -1)).to(self.device)
+                    nt = torch.from_numpy(last_exp.next_temporal_state.reshape(1, -1)).to(self.device)
+                    next_value = float(self.critic(ns, nt).cpu().item())
+
+                m_adv, m_ret = self._compute_gae(m_rewards, m_values, m_dones, next_value)
+                for j, idx in enumerate(indices):
+                    advantages[idx] = m_adv[j]
+                    returns[idx] = m_ret[j]
+
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         states_t = torch.from_numpy(states).to(self.device)

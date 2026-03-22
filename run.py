@@ -646,6 +646,7 @@ class TradingEngine:
                             log_prob=self._prev_log_probs.get(cid, 0.0),
                             value=self._prev_values.get(cid, 0.0),
                             temporal_state=self._prev_temporal_states.get(cid),
+                            cid=cid,
                         )
 
                     self.prev_states.pop(cid, None)
@@ -790,6 +791,7 @@ class TradingEngine:
                             log_prob=self._prev_log_probs.get(cid),
                             value=self._prev_values.get(cid),
                             temporal_state=self._prev_temporal_states.get(cid),
+                            cid=cid,
                         )
 
                     self.prev_states[cid] = copy.deepcopy(state)
