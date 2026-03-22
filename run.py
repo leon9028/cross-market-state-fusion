@@ -133,7 +133,7 @@ class TradingEngine:
         self._interval_close_pnls: List[float] = []
 
         # External stop-loss: force close when unrealized loss > threshold % of position
-        self.STOP_LOSS_PCT = 0.20  # 20% of position notional
+        self.STOP_LOSS_PCT = 0.40  # 40% of position notional
         self._interval_stoploss_count = 0  # per PPO-update interval (reset each update)
         self._total_stoploss_count = 0     # cumulative
 
@@ -787,17 +787,18 @@ class TradingEngine:
                         print(f"    🛑 STOP-LOSS: {pos.asset} loss={loss_pct:.1%} (threshold={-self.STOP_LOSS_PCT:.0%})")
                         close_action = Action.SELL if pos.side == "UP" else Action.BUY
                         self.execute_action(cid, close_action, state)
-                        self._interval_stoploss_count += 1
-                        self._total_stoploss_count += 1
-                        # Clean up RL state (same as early close — external rule, not RL)
-                        self.prev_states.pop(cid, None)
-                        self._prev_actions.pop(cid, None)
-                        self._prev_log_probs.pop(cid, None)
-                        self._prev_values.pop(cid, None)
-                        self._prev_temporal_states.pop(cid, None)
-                        self.pending_rewards.pop(cid, None)
-                        self.pending_mid_rewards.pop(cid, None)
-                        self._baseline_pnl[cid] = self._realized_pnl.get(cid, 0.0)
+                        # Only count + cleanup if position was actually closed
+                        if pos.size == 0 and pos.shares == 0:
+                            self._interval_stoploss_count += 1
+                            self._total_stoploss_count += 1
+                            self.prev_states.pop(cid, None)
+                            self._prev_actions.pop(cid, None)
+                            self._prev_log_probs.pop(cid, None)
+                            self._prev_values.pop(cid, None)
+                            self._prev_temporal_states.pop(cid, None)
+                            self.pending_rewards.pop(cid, None)
+                            self.pending_mid_rewards.pop(cid, None)
+                            self._baseline_pnl[cid] = self._realized_pnl.get(cid, 0.0)
                         continue
 
                 # Get action from strategy
