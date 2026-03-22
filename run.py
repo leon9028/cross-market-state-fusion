@@ -787,10 +787,22 @@ class TradingEngine:
                         print(f"    🛑 STOP-LOSS: {pos.asset} loss={loss_pct:.1%} (threshold={-self.STOP_LOSS_PCT:.0%})")
                         close_action = Action.SELL if pos.side == "UP" else Action.BUY
                         self.execute_action(cid, close_action, state)
-                        # Only count + cleanup if position was actually closed
                         if pos.size == 0 and pos.shares == 0:
                             self._interval_stoploss_count += 1
                             self._total_stoploss_count += 1
+                            # Store terminal experience so model learns this was a bad entry
+                            if isinstance(self.strategy, RLStrategy) and self.strategy.training:
+                                prev_state = self.prev_states.get(cid)
+                                prev_action = self._prev_actions.get(cid)
+                                if prev_state is not None and prev_action is not None:
+                                    sl_reward = self._compute_step_reward(cid, state, prev_action, pos)
+                                    self.strategy.store(
+                                        prev_state, prev_action, sl_reward, state, done=True,
+                                        log_prob=self._prev_log_probs.get(cid, 0.0),
+                                        value=self._prev_values.get(cid, 0.0),
+                                        temporal_state=self._prev_temporal_states.get(cid),
+                                        cid=cid,
+                                    )
                             self.prev_states.pop(cid, None)
                             self._prev_actions.pop(cid, None)
                             self._prev_log_probs.pop(cid, None)
