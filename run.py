@@ -504,7 +504,8 @@ class TradingEngine:
                 condition_id=cid
             )
 
-    def _compute_step_reward(self, cid: str, state: 'MarketState', action: 'Action', pos: 'Position') -> float:
+    def _compute_step_reward(self, cid: str, state: 'MarketState', action: 'Action', pos: 'Position',
+                             clip: bool = True) -> float:
         """Per-tick reward based on change in blended realized/unrealized PnL.
 
         定義:
@@ -518,7 +519,7 @@ class TradingEngine:
         - HOLD 虧損倉: 價格對你不利 → U_t 更負 → reward_t < 0，持續被懲罰
         - 平倉實現獲利: U_t 從正值跳回 0，R_t 累加 → B_t 從 alpha*U 跳到 1*U，多出 (1-alpha)*U 的正 spike
         """
-        alpha = 0.5  # unrealized loss 懲罰更直接 (was 0.3)
+        alpha = 0.5
 
         realized = self._realized_pnl.get(cid, 0.0)
         unrealized = state.position_pnl
@@ -527,7 +528,8 @@ class TradingEngine:
         baseline = realized + alpha * unrealized
         reward = baseline - prev_baseline
 
-        reward = max(-10.0, min(10.0, reward))
+        if clip:
+            reward = max(-10.0, min(10.0, reward))
 
         self._baseline_pnl[cid] = baseline
         return reward
@@ -795,7 +797,7 @@ class TradingEngine:
                                 prev_state = self.prev_states.get(cid)
                                 prev_action = self._prev_actions.get(cid)
                                 if prev_state is not None and prev_action is not None:
-                                    sl_reward = self._compute_step_reward(cid, state, prev_action, pos)
+                                    sl_reward = self._compute_step_reward(cid, state, prev_action, pos, clip=False)
                                     self.strategy.store(
                                         prev_state, prev_action, sl_reward, state, done=True,
                                         log_prob=self._prev_log_probs.get(cid, 0.0),
