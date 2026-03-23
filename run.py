@@ -505,7 +505,7 @@ class TradingEngine:
             )
 
     def _compute_step_reward(self, cid: str, state: 'MarketState', action: 'Action', pos: 'Position',
-                             clip: bool = True) -> float:
+                             clip_range: tuple = (-10.0, 10.0)) -> float:
         """Per-tick reward based on change in blended realized/unrealized PnL.
 
         定義:
@@ -528,8 +528,7 @@ class TradingEngine:
         baseline = realized + alpha * unrealized
         reward = baseline - prev_baseline
 
-        if clip:
-            reward = max(-10.0, min(10.0, reward))
+        reward = max(clip_range[0], min(clip_range[1], reward))
 
         self._baseline_pnl[cid] = baseline
         return reward
@@ -797,7 +796,7 @@ class TradingEngine:
                                 prev_state = self.prev_states.get(cid)
                                 prev_action = self._prev_actions.get(cid)
                                 if prev_state is not None and prev_action is not None:
-                                    sl_reward = self._compute_step_reward(cid, state, prev_action, pos, clip=False)
+                                    sl_reward = self._compute_step_reward(cid, state, prev_action, pos, clip_range=(-30.0, 10.0))
                                     self.strategy.store(
                                         prev_state, prev_action, sl_reward, state, done=True,
                                         log_prob=self._prev_log_probs.get(cid, 0.0),
@@ -815,12 +814,19 @@ class TradingEngine:
                             self._baseline_pnl[cid] = self._realized_pnl.get(cid, 0.0)
                         continue
 
-                # Get action from strategy
-                action = self.strategy.act(state)
-                self.action_counts[action.value] += 1
+                # Skip RL act + experience during pending open (action would be silently ignored)
+                is_pending = cid in self._pending_paper_opens
+
+                if not is_pending:
+                    # Get action from strategy
+                    action = self.strategy.act(state)
+                    self.action_counts[action.value] += 1
+                else:
+                    action = Action.HOLD
 
                 # RL: Store experience using PREVIOUS tick's (action, log_prob, value)
-                if isinstance(self.strategy, RLStrategy) and self.strategy.training:
+                # Skip if cid is pending open — reward/action would be meaningless noise
+                if isinstance(self.strategy, RLStrategy) and self.strategy.training and not is_pending:
                     prev_state = self.prev_states.get(cid)
                     prev_action = self._prev_actions.get(cid)
                     if prev_state is not None and prev_action is not None:

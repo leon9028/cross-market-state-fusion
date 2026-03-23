@@ -112,7 +112,7 @@ class RLStrategy(Strategy):
         gamma: float = 0.95,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.2,
-        entropy_coef: float = 0.08,  # Prevent policy collapse (was 0.03 → SELL died)
+        entropy_coef: float = 0.04,  # Balance exploration/exploitation (0.08 kept entropy too high)
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         buffer_size: int = 512,
