@@ -14,7 +14,7 @@ from safetensors.torch import save_file as safetensors_save
 from safetensors.torch import load_file as safetensors_load
 from typing import List, Dict, Optional
 from dataclasses import dataclass
-from .base import Strategy, MarketState, Action
+from .base import Strategy, MarketState, Action, STATE_FEATURE_DIM
 
 
 @dataclass
@@ -35,7 +35,7 @@ class Experience:
 class TemporalEncoder(nn.Module):
     """Encodes temporal sequence of states into momentum/trend features."""
 
-    def __init__(self, input_dim: int = 18, history_len: int = 5, output_dim: int = 32):
+    def __init__(self, input_dim: int = STATE_FEATURE_DIM, history_len: int = 5, output_dim: int = 32):
         super().__init__()
         self.history_len = history_len
         self.temporal_input = input_dim * history_len
@@ -53,7 +53,7 @@ class TemporalEncoder(nn.Module):
 class Actor(nn.Module):
     """Policy network with temporal awareness."""
 
-    def __init__(self, input_dim: int = 18, hidden_size: int = 64, output_dim: int = 3,
+    def __init__(self, input_dim: int = STATE_FEATURE_DIM, hidden_size: int = 64, output_dim: int = 3,
                  history_len: int = 5, temporal_dim: int = 32):
         super().__init__()
         self.temporal_encoder = TemporalEncoder(input_dim, history_len, temporal_dim)
@@ -81,7 +81,7 @@ class Actor(nn.Module):
 class Critic(nn.Module):
     """Value network with temporal awareness (larger than actor)."""
 
-    def __init__(self, input_dim: int = 18, hidden_size: int = 128,
+    def __init__(self, input_dim: int = STATE_FEATURE_DIM, hidden_size: int = 128,
                  history_len: int = 5, temporal_dim: int = 32):
         super().__init__()
         self.temporal_encoder = TemporalEncoder(input_dim, history_len, temporal_dim)
@@ -106,7 +106,7 @@ class RLStrategy(Strategy):
 
     def __init__(
         self,
-        input_dim: int = 18,
+        input_dim: int = STATE_FEATURE_DIM,
         hidden_size: int = 64,
         critic_hidden_size: int = 128,
         history_len: int = 5,

@@ -18,14 +18,14 @@ import numpy as np
 from collections import deque
 from typing import List, Dict, Optional
 from dataclasses import dataclass
-from .base import Strategy, MarketState, Action
+from .base import Strategy, MarketState, Action, STATE_FEATURE_DIM
 
 
 @dataclass
 class Experience:
     """Single experience tuple with temporal context."""
-    state: np.ndarray  # Current state features (18,)
-    temporal_state: np.ndarray  # Stacked temporal features (history_len * 18,)
+    state: np.ndarray  # Current state features (STATE_FEATURE_DIM,)
+    temporal_state: np.ndarray  # Stacked temporal features (history_len * STATE_FEATURE_DIM,)
     action: int
     reward: float
     next_state: np.ndarray
@@ -42,11 +42,11 @@ class TemporalEncoder(nn.Module):
     Takes last N states and compresses them into a fixed-size representation
     that captures velocity, acceleration, and trend direction.
 
-    Architecture: (history_len * 18) → 64 → LayerNorm → tanh → 32
+    Architecture: (history_len * input_dim) → 64 → LayerNorm → tanh → 32
     Output is concatenated with current state features.
     """
 
-    def __init__(self, input_dim: int = 18, history_len: int = 5, output_dim: int = 32):
+    def __init__(self, input_dim: int = STATE_FEATURE_DIM, history_len: int = 5, output_dim: int = 32):
         super().__init__()
         self.history_len = history_len
         self.temporal_input = input_dim * history_len
@@ -66,14 +66,14 @@ class Actor(nn.Module):
     """Policy network with temporal awareness.
 
     Architecture:
-        Current state (18) + Temporal features (32) = 50
+        Current state (input_dim) + Temporal features (32) = input_dim + 32
         → 64 → LayerNorm → tanh → 64 → LayerNorm → tanh → 3 (softmax)
 
     Temporal encoder captures momentum/trends from state history.
     Smaller network (64) to prevent overfitting on enhanced features.
     """
 
-    def __init__(self, input_dim: int = 18, hidden_size: int = 64, output_dim: int = 3,
+    def __init__(self, input_dim: int = STATE_FEATURE_DIM, hidden_size: int = 64, output_dim: int = 3,
                  history_len: int = 5, temporal_dim: int = 32):
         super().__init__()
         self.temporal_encoder = TemporalEncoder(input_dim, history_len, temporal_dim)
@@ -92,8 +92,8 @@ class Actor(nn.Module):
         """Forward pass. Returns action probabilities.
 
         Args:
-            current_state: (batch, 18) current features
-            temporal_state: (batch, history_len * 18) stacked history
+            current_state: (batch, input_dim) current features
+            temporal_state: (batch, history_len * input_dim) stacked history
         """
         # Encode temporal context
         temporal_features = self.temporal_encoder(temporal_state)
@@ -114,7 +114,7 @@ class Critic(nn.Module):
     """Value network with temporal awareness - ASYMMETRIC (larger than actor).
 
     Architecture:
-        Current state (18) + Temporal features (32) = 50
+        Current state (input_dim) + Temporal features (32) = input_dim + 32
         → 128 → LayerNorm → tanh → 128 → LayerNorm → tanh → 1
 
     Larger network (128 vs 64) because:
@@ -123,7 +123,7 @@ class Critic(nn.Module):
     - Better value estimates improve advantage computation
     """
 
-    def __init__(self, input_dim: int = 18, hidden_size: int = 128,
+    def __init__(self, input_dim: int = STATE_FEATURE_DIM, hidden_size: int = 128,
                  history_len: int = 5, temporal_dim: int = 32):
         super().__init__()
         self.temporal_encoder = TemporalEncoder(input_dim, history_len, temporal_dim)
@@ -140,8 +140,8 @@ class Critic(nn.Module):
         """Forward pass. Returns value estimate.
 
         Args:
-            current_state: (batch, 18) current features
-            temporal_state: (batch, history_len * 18) stacked history
+            current_state: (batch, input_dim) current features
+            temporal_state: (batch, history_len * input_dim) stacked history
         """
         # Encode temporal context
         temporal_features = self.temporal_encoder(temporal_state)
@@ -167,7 +167,7 @@ class RLStrategy(Strategy):
 
     def __init__(
         self,
-        input_dim: int = 18,
+        input_dim: int = STATE_FEATURE_DIM,
         hidden_size: int = 64,  # Actor hidden size
         critic_hidden_size: int = 128,  # Larger critic for better value estimation
         history_len: int = 5,  # Number of past states for temporal processing

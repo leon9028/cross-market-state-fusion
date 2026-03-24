@@ -8,6 +8,9 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 from enum import Enum
 
+# Single source of truth for RL / gating — bump when changing to_features().
+STATE_FEATURE_DIM = 24
+
 
 class Action(Enum):
     HOLD = 0
@@ -104,9 +107,10 @@ class MarketState:
     trend_regime: float = 0.0  # Trending or ranging
 
     def to_features(self) -> np.ndarray:
-        """Convert to feature vector for ML models. Returns 18 features normalized to [-1, 1]."""
-        velocity = self._velocity(3)  # Shorter window
-        vol_5m = self._volatility(30)  # ~5 min of ticks
+        """Convert to feature vector for ML models. ``STATE_FEATURE_DIM`` floats in ~[-1, 1]."""
+        velocity = self._velocity(3)
+        mom20 = self._momentum(20)
+        vol_5m = self._volatility(30)  # ~5 min of ticks (prob path)
 
         # Spread as percentage
         spread_pct = self.spread / max(0.01, self.prob) if self.prob > 0 else 0.0
@@ -115,38 +119,50 @@ class MarketState:
         def clamp(x, min_val=-1.0, max_val=1.0):
             return max(min_val, min(max_val, x))
 
-        return np.array([
-            # Ultra-short momentum (3) - returns scaled and clamped
-            # Typical returns are -0.02 to 0.02, so *50 maps to [-1, 1]
+        # CVD level (slow drift); accel is already a feature — both matter for flow
+        cvd_norm = float(np.tanh(self.cvd / 5e6))
+
+        feats = np.array([
+            # Prob level & Polymarket microstructure (3) — was missing from old 18-dim
+            clamp((self.prob - 0.5) * 2.0),
+            clamp(velocity * 50.0),
+            clamp(mom20 * 50.0),
+
+            # Underlying returns (4)
             clamp(self.returns_1m * 50),
             clamp(self.returns_5m * 50),
             clamp(self.returns_10m * 50),
+            clamp(self.binance_change * 50),
 
-            # Order flow - THE EDGE (4) - already [-1, 1] range mostly
+            # Order flow (5)
             clamp(self.order_book_imbalance_l1),
             clamp(self.order_book_imbalance_l5),
             clamp(self.trade_flow_imbalance),
-            clamp(self.cvd_acceleration * 10),  # CVD accel is small, scale up
+            clamp(self.cvd_acceleration * 10),
+            cvd_norm,
 
             # Microstructure (3)
-            clamp(spread_pct * 20),  # Spread ~0-5%, so *20 maps to [0,1]
-            clamp(self.trade_intensity / 10),  # Normalize by typical max intensity
-            self.large_trade_flag,  # Already 0 or 1
+            clamp(spread_pct * 20),
+            clamp(self.trade_intensity / 10),
+            self.large_trade_flag,
 
-            # Volatility (2)
-            clamp(vol_5m * 20),  # Vol ~0-5%, scale up
-            clamp(self.vol_expansion),  # Typically [-1, 2], clamp it
+            # Volatility (3): prob-path + expansion + futures realized
+            clamp(vol_5m * 20),
+            clamp(self.vol_expansion),
+            clamp(self.realized_vol_5m * 20),
 
             # Position (4)
-            float(self.has_position),  # 0 or 1
+            float(self.has_position),
             1.0 if self.position_side == "UP" else (-1.0 if self.position_side == "DOWN" else 0.0),
-            clamp(self.position_pnl / 50),  # Normalize by typical PnL range ($50)
-            self.time_remaining,  # Already [0, 1]
+            clamp(self.position_pnl / 50),
+            self.time_remaining,
 
             # Regime (2)
-            self.vol_regime,  # 0 or 1
-            self.trend_regime,  # 0 or 1
+            self.vol_regime,
+            self.trend_regime,
         ], dtype=np.float32)
+        assert feats.shape == (STATE_FEATURE_DIM,), feats.shape
+        return feats
 
     def _velocity(self, window: int = 5) -> float:
         """Prob change over last N ticks."""

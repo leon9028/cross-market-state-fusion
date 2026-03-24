@@ -4,7 +4,7 @@ Gating strategy - Mixture of Experts that routes to different strategies.
 """
 import numpy as np
 from typing import List, Dict
-from .base import Strategy, MarketState, Action
+from .base import Strategy, MarketState, Action, STATE_FEATURE_DIM
 
 
 class GatingStrategy(Strategy):
@@ -16,7 +16,7 @@ class GatingStrategy(Strategy):
         self.n_experts = len(experts)
 
         # Gating network
-        self.input_dim = 18  # Optimized for 15-min expiries
+        self.input_dim = STATE_FEATURE_DIM
         self.w1 = np.random.randn(self.input_dim, hidden_size) * 0.1
         self.b1 = np.zeros(hidden_size)
         self.w2 = np.random.randn(hidden_size, self.n_experts) * 0.1
