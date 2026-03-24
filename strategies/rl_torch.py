@@ -77,7 +77,7 @@ class Actor(nn.Module):
 class Critic(nn.Module):
     """Value network with temporal awareness (larger than actor)."""
 
-    def __init__(self, input_dim: int = 18, hidden_size: int = 96,
+    def __init__(self, input_dim: int = 18, hidden_size: int = 128,
                  history_len: int = 5, temporal_dim: int = 32):
         super().__init__()
         self.temporal_encoder = TemporalEncoder(input_dim, history_len, temporal_dim)
@@ -104,15 +104,15 @@ class RLStrategy(Strategy):
         self,
         input_dim: int = 18,
         hidden_size: int = 64,
-        critic_hidden_size: int = 96,
+        critic_hidden_size: int = 128,
         history_len: int = 5,
         temporal_dim: int = 32,
         lr_actor: float = 5e-5,
         lr_critic: float = 1.5e-4,
         gamma: float = 0.95,
         gae_lambda: float = 0.95,
-        clip_epsilon: float = 0.2,
-        entropy_coef: float = 0.04,  # Balance exploration/exploitation (0.08 kept entropy too high)
+        clip_epsilon: float = 0.15,  # Tighter clipping to prevent policy oscillation
+        entropy_coef: float = 0.05,  # 0.08 too high (no convergence), 0.04 too low (collapse oscillation)
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         buffer_size: int = 512,

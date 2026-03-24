@@ -111,15 +111,15 @@ class Critic(nn.Module):
 
     Architecture:
         Current state (18) + Temporal features (32) = 50
-        → 96 → LayerNorm → tanh → 96 → LayerNorm → tanh → 1
+        → 128 → LayerNorm → tanh → 128 → LayerNorm → tanh → 1
 
-    Larger network (96 vs 64) because:
+    Larger network (128 vs 64) because:
     - Value estimation is harder than policy
     - Critic doesn't overfit as easily (regresses to scalar)
     - Better value estimates improve advantage computation
     """
 
-    def __init__(self, input_dim: int = 18, hidden_size: int = 96,
+    def __init__(self, input_dim: int = 18, hidden_size: int = 128,
                  history_len: int = 5, temporal_dim: int = 32):
         super().__init__()
         self.temporal_encoder = TemporalEncoder(input_dim, history_len, temporal_dim)
@@ -165,15 +165,15 @@ class RLStrategy(Strategy):
         self,
         input_dim: int = 18,
         hidden_size: int = 64,  # Actor hidden size
-        critic_hidden_size: int = 96,  # Larger critic for better value estimation
+        critic_hidden_size: int = 128,  # Larger critic for better value estimation
         history_len: int = 5,  # Number of past states for temporal processing
         temporal_dim: int = 32,  # Temporal encoder output size
         lr_actor: float = 5e-5,
         lr_critic: float = 1.5e-4,
         gamma: float = 0.95,  # Lower gamma for 15-min horizon (was 0.99)
         gae_lambda: float = 0.95,
-        clip_epsilon: float = 0.2,
-        entropy_coef: float = 0.04,  # Balance exploration/exploitation (0.08 kept entropy too high)
+        clip_epsilon: float = 0.15,  # Tighter clipping to prevent policy oscillation
+        entropy_coef: float = 0.05,  # 0.08 too high (no convergence), 0.04 too low (collapse oscillation)
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         buffer_size: int = 512,
