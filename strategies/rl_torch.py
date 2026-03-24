@@ -64,6 +64,8 @@ class Actor(nn.Module):
         self.ln2 = nn.LayerNorm(hidden_size)
         self.fc3 = nn.Linear(hidden_size, output_dim)
 
+    ACTION_FLOOR = 0.05
+
     def forward(self, current_state: torch.Tensor, temporal_state: torch.Tensor) -> torch.Tensor:
         temporal_features = self.temporal_encoder(temporal_state)
         combined = torch.cat([current_state, temporal_features], dim=-1)
@@ -71,6 +73,8 @@ class Actor(nn.Module):
         h = torch.tanh(self.ln2(self.fc2(h)))
         logits = self.fc3(h)
         probs = torch.softmax(logits, dim=-1)
+        probs = torch.clamp(probs, min=self.ACTION_FLOOR)
+        probs = probs / probs.sum(dim=-1, keepdim=True)
         return probs
 
 

@@ -86,6 +86,8 @@ class Actor(nn.Module):
         self.ln2 = nn.LayerNorm(hidden_size)
         self.fc3 = nn.Linear(hidden_size, output_dim)
 
+    ACTION_FLOOR = 0.05
+
     def __call__(self, current_state: mx.array, temporal_state: mx.array) -> mx.array:
         """Forward pass. Returns action probabilities.
 
@@ -103,6 +105,8 @@ class Actor(nn.Module):
         h = mx.tanh(self.ln2(self.fc2(h)))
         logits = self.fc3(h)
         probs = mx.softmax(logits, axis=-1)
+        probs = mx.clip(probs, self.ACTION_FLOOR, 1.0)
+        probs = probs / mx.sum(probs, axis=-1, keepdims=True)
         return probs
 
 
