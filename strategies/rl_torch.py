@@ -109,7 +109,7 @@ class RLStrategy(Strategy):
         temporal_dim: int = 32,
         lr_actor: float = 5e-5,
         lr_critic: float = 1.5e-4,
-        gamma: float = 0.95,
+        gamma: float = 0.80,  # Short horizon; 0.95 made returns too noisy for Critic
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.15,  # Tighter clipping to prevent policy oscillation
         entropy_coef: float = 0.05,  # 0.08 too high (no convergence), 0.04 too low (collapse oscillation)
@@ -117,7 +117,7 @@ class RLStrategy(Strategy):
         max_grad_norm: float = 0.5,
         buffer_size: int = 512,
         batch_size: int = 64,
-        n_epochs: int = 10,
+        n_epochs: int = 5,  # 10 overfits to noisy 512-sample batch
         target_kl: float = 0.02,
     ):
         super().__init__("rl")
