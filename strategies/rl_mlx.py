@@ -168,21 +168,22 @@ class RLStrategy(Strategy):
     def __init__(
         self,
         input_dim: int = STATE_FEATURE_DIM,
-        hidden_size: int = 64,  # Actor hidden size
-        critic_hidden_size: int = 128,  # Larger critic for better value estimation
-        history_len: int = 5,  # Number of past states for temporal processing
-        temporal_dim: int = 32,  # Temporal encoder output size
-        lr_actor: float = 5e-5,
-        lr_critic: float = 1.5e-4,
-        gamma: float = 0.80,  # Short horizon; 0.95 made returns too noisy for Critic
+        hidden_size: int = 64,
+        critic_hidden_size: int = 128,
+        history_len: int = 5,
+        temporal_dim: int = 32,
+        lr_actor: float = 1.5e-5,   # was 5e-5 — slower actor to curb oscillation (reward SNR ~0.09)
+        lr_critic: float = 3e-4,    # was 1.5e-4 — faster critic to lift EV from 0.03
+        gamma: float = 0.80,
         gae_lambda: float = 0.95,
-        clip_epsilon: float = 0.15,  # Tighter clipping to prevent policy oscillation
-        entropy_coef: float = 0.05,  # 0.08 too high (no convergence), 0.04 too low (collapse oscillation)
+        clip_epsilon: float = 0.15,
+        entropy_coef: float = 0.05,
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
-        buffer_size: int = 512,
-        batch_size: int = 64,
-        n_epochs: int = 5,  # 10 overfits to noisy 512-sample batch
+        buffer_size: int = 2048,    # was 512 — 4× more data ⇒ ~2× noise reduction
+        batch_size: int = 128,      # was 64 — proportional to buffer
+        n_epochs: int = 3,          # was 5 — fewer actor epochs (critic gets extra below)
+        n_critic_extra_epochs: int = 5,  # critic-only training after joint PPO loop
         target_kl: float = 0.02,
     ):
         super().__init__("rl")
@@ -205,6 +206,7 @@ class RLStrategy(Strategy):
         self.buffer_size = buffer_size
         self.batch_size = batch_size
         self.n_epochs = n_epochs
+        self.n_critic_extra_epochs = n_critic_extra_epochs
         self.target_kl = target_kl
 
         # Networks with temporal processing
@@ -502,18 +504,10 @@ class RLStrategy(Strategy):
 
                     return policy_loss, (entropy_mean, approx_kl, clip_frac)
 
-                # Define loss function for critic (takes model, not params)
+                # Critic loss — no value clipping (was trapping critic when policy shifted)
                 def critic_loss_fn(model):
                     values = model(batch_states, batch_temporal).squeeze()
-
-                    # Value loss with clipping (PPO2 style)
-                    values_clipped = batch_old_values + mx.clip(
-                        values - batch_old_values, -self.clip_epsilon, self.clip_epsilon
-                    )
-                    value_loss1 = (batch_returns - values) ** 2
-                    value_loss2 = (batch_returns - values_clipped) ** 2
-                    value_loss = 0.5 * mx.mean(mx.maximum(value_loss1, value_loss2))
-
+                    value_loss = 0.5 * mx.mean((batch_returns - values) ** 2)
                     return value_loss
 
                 # Compute actor gradients and update
@@ -559,6 +553,26 @@ class RLStrategy(Strategy):
             if avg_kl > self.target_kl:
                 print(f"  [RL] Early stop epoch {epoch}, KL={avg_kl:.4f}")
                 break
+
+        # Extra critic-only epochs (actor frozen) to lift explained_variance
+        for _ in range(self.n_critic_extra_epochs):
+            c_indices = np.random.permutation(n_samples)
+            for start in range(0, n_samples, self.batch_size):
+                end = min(start + self.batch_size, n_samples)
+                batch_idx = mx.array(c_indices[start:end].astype(np.int32))
+                b_states = mx.take(states_mx, batch_idx, axis=0)
+                b_temporal = mx.take(temporal_states_mx, batch_idx, axis=0)
+                b_returns = mx.take(returns_mx, batch_idx, axis=0)
+
+                def critic_only_loss(model):
+                    v = model(b_states, b_temporal).squeeze()
+                    return 0.5 * mx.mean((b_returns - v) ** 2)
+
+                c_loss_and_grad = nn.value_and_grad(self.critic, critic_only_loss)
+                _, c_grads = c_loss_and_grad(self.critic)
+                c_grads = self._clip_grad_norm(c_grads, self.max_grad_norm)
+                self.critic_optimizer.update(self.critic, c_grads)
+                mx.eval(self.critic.parameters(), self.critic_optimizer.state)
 
         # Compute diagnostics before clearing buffer
         var_y = np.var(returns)

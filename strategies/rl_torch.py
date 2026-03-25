@@ -111,17 +111,18 @@ class RLStrategy(Strategy):
         critic_hidden_size: int = 128,
         history_len: int = 5,
         temporal_dim: int = 32,
-        lr_actor: float = 5e-5,
-        lr_critic: float = 1.5e-4,
-        gamma: float = 0.80,  # Short horizon; 0.95 made returns too noisy for Critic
+        lr_actor: float = 1.5e-5,
+        lr_critic: float = 3e-4,
+        gamma: float = 0.80,
         gae_lambda: float = 0.95,
-        clip_epsilon: float = 0.15,  # Tighter clipping to prevent policy oscillation
-        entropy_coef: float = 0.05,  # 0.08 too high (no convergence), 0.04 too low (collapse oscillation)
+        clip_epsilon: float = 0.15,
+        entropy_coef: float = 0.05,
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
-        buffer_size: int = 512,
-        batch_size: int = 64,
-        n_epochs: int = 5,  # 10 overfits to noisy 512-sample batch
+        buffer_size: int = 2048,
+        batch_size: int = 128,
+        n_epochs: int = 3,
+        n_critic_extra_epochs: int = 5,
         target_kl: float = 0.02,
     ):
         super().__init__("rl")
@@ -149,6 +150,7 @@ class RLStrategy(Strategy):
         self.buffer_size = buffer_size
         self.batch_size = batch_size
         self.n_epochs = n_epochs
+        self.n_critic_extra_epochs = n_critic_extra_epochs
         self.target_kl = target_kl
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -358,12 +360,9 @@ class RLStrategy(Strategy):
                 nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                 self.actor_optimizer.step()
 
-                # Critic loss
+                # Critic loss — no value clipping (was trapping critic when policy shifted)
                 values = self.critic(batch_states, batch_temporal).squeeze(-1)
-                values_clipped = batch_old_values + torch.clamp(values - batch_old_values, -self.clip_epsilon, self.clip_epsilon)
-                value_loss1 = (batch_returns - values) ** 2
-                value_loss2 = (batch_returns - values_clipped) ** 2
-                value_loss = 0.5 * torch.max(value_loss1, value_loss2).mean()
+                value_loss = 0.5 * ((batch_returns - values) ** 2).mean()
 
                 self.critic_optimizer.zero_grad()
                 value_loss.backward()
@@ -382,6 +381,23 @@ class RLStrategy(Strategy):
             if avg_kl > self.target_kl:
                 print(f"  [RL] Early stop epoch {epoch}, KL={avg_kl:.4f}")
                 break
+
+        # Extra critic-only epochs (actor frozen) to lift explained_variance
+        for _ in range(self.n_critic_extra_epochs):
+            c_indices = np.random.permutation(n_samples)
+            for start in range(0, n_samples, self.batch_size):
+                end = min(start + self.batch_size, n_samples)
+                idx = c_indices[start:end]
+                b_states = states_t[idx]
+                b_temporal = temporal_t[idx]
+                b_returns = returns_t[idx]
+
+                v = self.critic(b_states, b_temporal).squeeze(-1)
+                c_loss = 0.5 * ((b_returns - v) ** 2).mean()
+                self.critic_optimizer.zero_grad()
+                c_loss.backward()
+                nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+                self.critic_optimizer.step()
 
         # Compute diagnostics before clearing buffer
         var_y = np.var(returns)
