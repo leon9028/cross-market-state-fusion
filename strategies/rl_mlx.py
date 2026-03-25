@@ -169,21 +169,21 @@ class RLStrategy(Strategy):
         self,
         input_dim: int = STATE_FEATURE_DIM,
         hidden_size: int = 64,
-        critic_hidden_size: int = 128,
+        critic_hidden_size: int = 192,  # was 128; critic needs more capacity (EV stuck ~0)
         history_len: int = 5,
         temporal_dim: int = 32,
-        lr_actor: float = 1.5e-5,   # was 5e-5 — slower actor to curb oscillation (reward SNR ~0.09)
-        lr_critic: float = 3e-4,    # was 1.5e-4 — faster critic to lift EV from 0.03
+        lr_actor: float = 3e-5,     # 1.5e-5 gave clip_fraction=0 (policy frozen); 5e-5 oscillated
+        lr_critic: float = 2e-4,    # 3e-4 w/ 5 extra epochs overfit; dial back
         gamma: float = 0.80,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.15,
-        entropy_coef: float = 0.05,
+        entropy_coef: float = 0.06,  # 0.05 let entropy collapse to 0.71 (hold=75%)
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         buffer_size: int = 2048,    # was 512 — 4× more data ⇒ ~2× noise reduction
         batch_size: int = 128,      # was 64 — proportional to buffer
         n_epochs: int = 3,          # was 5 — fewer actor epochs (critic gets extra below)
-        n_critic_extra_epochs: int = 5,  # critic-only training after joint PPO loop
+        n_critic_extra_epochs: int = 2,  # 5 overfit on 2048 samples (EV went negative)
         target_kl: float = 0.02,
     ):
         super().__init__("rl")
