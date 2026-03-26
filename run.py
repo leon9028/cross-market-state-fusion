@@ -137,6 +137,12 @@ class TradingEngine:
         self._interval_stoploss_count = 0  # per PPO-update interval (reset each update)
         self._total_stoploss_count = 0     # cumulative
 
+        # --- Reward shaping (Path A) ---
+        # Penalize BUY/SELL decisions proportional to relative spread.
+        # This discourages high-frequency "spread grinding" when edge is weak.
+        # Note: penalty is applied inside _compute_step_reward() and then clipped.
+        self.TRADE_COST_COEF = 30.0
+
         # Live: track pending orders at market (cid) level until position is verified
         # Prevents any new order for a market while a previous order is being processed
         self._pending_orders: set = set()  # Set of condition_ids with pending orders
@@ -527,6 +533,19 @@ class TradingEngine:
         prev_baseline = self._baseline_pnl.get(cid, 0.0)
         baseline = realized + alpha * unrealized
         reward = baseline - prev_baseline
+
+        # Path A: transaction/spread cost for taking BUY/SELL actions.
+        # Spread here is in "prob space"; normalize by the relevant token price proxy:
+        #   UP token price ~ prob
+        #   DOWN token price ~ (1 - prob)
+        if action != Action.HOLD:
+            ref_price = state.prob if action.is_buy else (1.0 - state.prob)
+            ref_price = max(0.01, ref_price)  # avoid blow-ups when prob ~ 0/1
+            spread_pct = (state.spread / ref_price) if state.spread is not None else 0.0
+            # Clamp: keep it bounded so reward stays learnable/stable.
+            spread_pct = max(0.0, min(0.20, spread_pct))
+            trade_cost = self.TRADE_COST_COEF * spread_pct
+            reward -= trade_cost
 
         reward = max(clip_range[0], min(clip_range[1], reward))
 
