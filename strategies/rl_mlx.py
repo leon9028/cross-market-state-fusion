@@ -177,13 +177,13 @@ class RLStrategy(Strategy):
         gamma: float = 0.80,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.15,
-        entropy_coef: float = 0.06,  # 0.05 let entropy collapse to 0.71 (hold=75%)
+        entropy_coef: float = 0.07,  # 0.06 still let entropy drop to ~0.73 (hold ~65%)
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         buffer_size: int = 2048,    # was 512 — 4× more data ⇒ ~2× noise reduction
         batch_size: int = 128,      # was 64 — proportional to buffer
         n_epochs: int = 3,          # was 5 — fewer actor epochs (critic gets extra below)
-        n_critic_extra_epochs: int = 2,  # 5 overfit on 2048 samples (EV went negative)
+        n_critic_extra_epochs: int = 3,  # 2: EV weakened in 2nd half of long runs
         target_kl: float = 0.02,
     ):
         super().__init__("rl")
@@ -366,6 +366,15 @@ class RLStrategy(Strategy):
 
         return advantages, returns
 
+    @staticmethod
+    def _smooth_l1_value_loss(pred, target, beta: float = 1.0):
+        """Huber on value errors — less sensitive to PnL spikes than pure MSE."""
+        err = target - pred
+        abs_e = mx.abs(err)
+        quad = 0.5 * (err ** 2) / beta
+        linear = abs_e - 0.5 * beta
+        return mx.mean(mx.where(abs_e < beta, quad, linear))
+
     def _clip_grad_norm(self, grads: dict, max_norm: float) -> dict:
         """Clip gradients by global norm (handles arbitrarily nested dicts)."""
 
@@ -507,8 +516,7 @@ class RLStrategy(Strategy):
                 # Critic loss — no value clipping (was trapping critic when policy shifted)
                 def critic_loss_fn(model):
                     values = model(batch_states, batch_temporal).squeeze()
-                    value_loss = 0.5 * mx.mean((batch_returns - values) ** 2)
-                    return value_loss
+                    return self._smooth_l1_value_loss(values, batch_returns)
 
                 # Compute actor gradients and update
                 actor_loss_and_grad = nn.value_and_grad(self.actor, actor_loss_fn)
@@ -566,7 +574,7 @@ class RLStrategy(Strategy):
 
                 def critic_only_loss(model):
                     v = model(b_states, b_temporal).squeeze()
-                    return 0.5 * mx.mean((b_returns - v) ** 2)
+                    return self._smooth_l1_value_loss(v, b_returns)
 
                 c_loss_and_grad = nn.value_and_grad(self.critic, critic_only_loss)
                 _, c_grads = c_loss_and_grad(self.critic)

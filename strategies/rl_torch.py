@@ -9,6 +9,7 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from collections import deque
 from safetensors.torch import save_file as safetensors_save
 from safetensors.torch import load_file as safetensors_load
@@ -116,13 +117,13 @@ class RLStrategy(Strategy):
         gamma: float = 0.80,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.15,
-        entropy_coef: float = 0.06,
+        entropy_coef: float = 0.07,
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         buffer_size: int = 2048,
         batch_size: int = 128,
         n_epochs: int = 3,
-        n_critic_extra_epochs: int = 2,
+        n_critic_extra_epochs: int = 3,
         target_kl: float = 0.02,
     ):
         super().__init__("rl")
@@ -360,9 +361,9 @@ class RLStrategy(Strategy):
                 nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                 self.actor_optimizer.step()
 
-                # Critic loss — no value clipping (was trapping critic when policy shifted)
+                # Critic loss — Smooth L1 (Huber) vs MSE: less blow-up on PnL spikes
                 values = self.critic(batch_states, batch_temporal).squeeze(-1)
-                value_loss = 0.5 * ((batch_returns - values) ** 2).mean()
+                value_loss = F.smooth_l1_loss(values, batch_returns, beta=1.0, reduction="mean")
 
                 self.critic_optimizer.zero_grad()
                 value_loss.backward()
@@ -393,7 +394,7 @@ class RLStrategy(Strategy):
                 b_returns = returns_t[idx]
 
                 v = self.critic(b_states, b_temporal).squeeze(-1)
-                c_loss = 0.5 * ((b_returns - v) ** 2).mean()
+                c_loss = F.smooth_l1_loss(v, b_returns, beta=1.0, reduction="mean")
                 self.critic_optimizer.zero_grad()
                 c_loss.backward()
                 nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
