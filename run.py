@@ -141,8 +141,9 @@ class TradingEngine:
         # Penalize BUY/SELL decisions proportional to relative spread.
         # This discourages high-frequency "spread grinding" when edge is weak.
         # Note: penalty is applied inside _compute_step_reward() and then clipped.
-        # 30→18 still heavy early on with SL clusters; 15 for gentler cold start.
-        self.TRADE_COST_COEF = 15.0
+        # Cost shaping should discourage low-edge entries, not punish risk reduction exits.
+        # 30→18→15 still produced high HOLD (~70-85%) in medium runs, so dial down further.
+        self.TRADE_COST_COEF = 12.0
 
         # Live: track pending orders at market (cid) level until position is verified
         # Prevents any new order for a market while a previous order is being processed
@@ -535,18 +536,19 @@ class TradingEngine:
         baseline = realized + alpha * unrealized
         reward = baseline - prev_baseline
 
-        # Path A: transaction/spread cost for taking BUY/SELL actions.
-        # Spread here is in "prob space"; normalize by the relevant token price proxy:
-        #   UP token price ~ prob
-        #   DOWN token price ~ (1 - prob)
-        if action != Action.HOLD:
+        # Path A: transaction/spread cost for entry actions only.
+        # Penalizing closes as well over-pushes HOLD and delays risk-off behavior.
+        is_open_entry = (
+            (action.is_buy and state.has_position and state.position_side == "UP")
+            or (action.is_sell and state.has_position and state.position_side == "DOWN")
+        )
+        if is_open_entry:
+            # Spread is in "prob space"; use corresponding token-price proxy.
             ref_price = state.prob if action.is_buy else (1.0 - state.prob)
-            ref_price = max(0.01, ref_price)  # avoid blow-ups when prob ~ 0/1
+            ref_price = max(0.01, ref_price)  # avoid blow-up near 0/1
             spread_pct = (state.spread / ref_price) if state.spread is not None else 0.0
-            # Clamp: keep it bounded so reward stays learnable/stable.
-            spread_pct = max(0.0, min(0.20, spread_pct))
-            trade_cost = self.TRADE_COST_COEF * spread_pct
-            reward -= trade_cost
+            spread_pct = max(0.0, min(0.20, spread_pct))  # keep bounded for stable learning
+            reward -= self.TRADE_COST_COEF * spread_pct
 
         reward = max(clip_range[0], min(clip_range[1], reward))
 
@@ -907,7 +909,8 @@ class TradingEngine:
                             avg_close_pnl = sum(self._interval_close_pnls) / n_trades
                             print(f"  [RL] interval trades={n_trades} avg_close_pnl={avg_close_pnl:+.4f}")
                             self._interval_close_pnls = []
-                        print(f"  [RL] loss={metrics['policy_loss']:.4f} "
+                        next_update_num = (self.logger.update_count + 1) if self.logger else 0
+                        print(f"  [RL][upd={next_update_num}] loss={metrics['policy_loss']:.4f} "
                               f"v_loss={metrics['value_loss']:.4f} "
                               f"ent={metrics['entropy']:.3f} "
                               f"kl={metrics['approx_kl']:.4f} "
@@ -970,9 +973,13 @@ class TradingEngine:
         """Print current status."""
         now = datetime.now(timezone.utc)
         win_rate = self.win_count / max(1, self.trade_count) * 100
+        ppo_updates = self.logger.update_count if self.logger else 0
 
         print(f"\n[{now.strftime('%H:%M:%S')}] {self.strategy.name.upper()}")
-        print(f"  PnL: ${self.total_pnl:+.2f} | Trades: {self.trade_count} | Win: {win_rate:.0f}%")
+        print(
+            f"  PnL: ${self.total_pnl:+.2f} | Trades: {self.trade_count} | "
+            f"Win: {win_rate:.0f}% | PPO updates: {ppo_updates}"
+        )
 
         # Prepare dashboard data
         dashboard_markets = {}
