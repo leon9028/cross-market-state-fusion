@@ -141,8 +141,8 @@ class TradingEngine:
         # Penalize BUY/SELL decisions proportional to relative spread.
         # This discourages high-frequency "spread grinding" when edge is weak.
         # Note: penalty is applied inside _compute_step_reward() and then clipped.
-        # 30.0 pushed hold to ~85% and $/trade worsened vs no-cost run; dial back.
-        self.TRADE_COST_COEF = 18.0
+        # 30→18 still heavy early on with SL clusters; 15 for gentler cold start.
+        self.TRADE_COST_COEF = 15.0
 
         # Live: track pending orders at market (cid) level until position is verified
         # Prevents any new order for a market while a previous order is being processed
