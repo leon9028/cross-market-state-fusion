@@ -24,6 +24,7 @@ env/
 venv/
 ENV/
 .DS_Store
+train_history/
 
 # Trained RL model (keep locally / on EC2, do not commit)
 *.pt

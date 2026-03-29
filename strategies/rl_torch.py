@@ -117,7 +117,7 @@ class RLStrategy(Strategy):
         gamma: float = 0.80,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.15,
-        entropy_coef: float = 0.07,
+        entropy_coef: float = 0.08,
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         buffer_size: int = 2048,
