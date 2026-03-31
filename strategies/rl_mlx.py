@@ -173,17 +173,17 @@ class RLStrategy(Strategy):
         history_len: int = 5,
         temporal_dim: int = 32,
         lr_actor: float = 3e-5,     # 1.5e-5 gave clip_fraction=0 (policy frozen); 5e-5 oscillated
-        lr_critic: float = 2e-4,    # 3e-4 w/ 5 extra epochs overfit; dial back
+        lr_critic: float = 2.5e-4,  # bump from 2e-4; EV stuck at ~0.007 over 328 updates — critic needs faster learning
         gamma: float = 0.80,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.15,
         entropy_coef: float = 0.09,  # short early runs (few updates) still bleed; nudge exploration vs spread penalty
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
-        buffer_size: int = 2048,    # was 512 — 4× more data ⇒ ~2× noise reduction
+        buffer_size: int = 1024,    # 2048 too stale for fast-changing 15m markets; 1024 balances freshness vs noise
         batch_size: int = 128,      # was 64 — proportional to buffer
         n_epochs: int = 3,          # was 5 — fewer actor epochs (critic gets extra below)
-        n_critic_extra_epochs: int = 3,  # 2: EV weakened in 2nd half of long runs
+        n_critic_extra_epochs: int = 5,  # buffer 2048→1024 halves critic grad steps; compensate with more epochs
         target_kl: float = 0.02,
     ):
         super().__init__("rl")
