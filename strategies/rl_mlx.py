@@ -172,18 +172,18 @@ class RLStrategy(Strategy):
         critic_hidden_size: int = 192,  # was 128; critic needs more capacity (EV stuck ~0)
         history_len: int = 5,
         temporal_dim: int = 32,
-        lr_actor: float = 3e-5,     # 1.5e-5 gave clip_fraction=0 (policy frozen); 5e-5 oscillated
+        lr_actor: float = 4e-5,     # 3e-5 still yields very low clip_fraction in long runs; push policy updates slightly harder
         lr_critic: float = 2.5e-4,  # bump from 2e-4; EV stuck at ~0.007 over 328 updates — critic needs faster learning
         gamma: float = 0.80,
         gae_lambda: float = 0.95,
-        clip_epsilon: float = 0.15,
+        clip_epsilon: float = 0.20,  # widen trust region; 0.15 under-updates with low-variance advantages
         entropy_coef: float = 0.09,  # short early runs (few updates) still bleed; nudge exploration vs spread penalty
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         buffer_size: int = 1024,    # 2048 too stale for fast-changing 15m markets; 1024 balances freshness vs noise
         batch_size: int = 128,      # was 64 — proportional to buffer
-        n_epochs: int = 3,          # was 5 — fewer actor epochs (critic gets extra below)
-        n_critic_extra_epochs: int = 5,  # buffer 2048→1024 halves critic grad steps; compensate with more epochs
+        n_epochs: int = 4,          # add one actor pass to improve policy plasticity (clip_fraction currently too low)
+        n_critic_extra_epochs: int = 4,  # slightly reduce critic dominance while keeping EV support
         target_kl: float = 0.02,
     ):
         super().__init__("rl")
