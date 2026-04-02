@@ -5,8 +5,33 @@ Logs trades, PPO updates, and episode summaries to CSV files.
 import csv
 import os
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
+
+# Must stay aligned with ``strategies.base.STATE_FEATURE_DIM`` (RL ``to_features()`` length).
+STATE_FEATURE_DIM = 24
+
+
+def _trade_csv_fieldnames() -> List[str]:
+    return [
+        "timestamp", "asset", "action", "side", "entry_price", "exit_price",
+        "size", "pnl", "duration_sec", "time_remaining", "prob_at_entry",
+        "prob_at_exit", "binance_change", "condition_id",
+    ] + [f"f{i}" for i in range(STATE_FEATURE_DIM)]
+
+
+def _trade_row_dict(record: "TradeRecord") -> Dict:
+    """Flatten TradeRecord to CSV row (f0..f23 from optional ``features``)."""
+    d = asdict(record)
+    feats = d.pop("features", None)
+    out = {**d}
+    if feats is not None and len(feats) == STATE_FEATURE_DIM:
+        for i in range(STATE_FEATURE_DIM):
+            out[f"f{i}"] = float(feats[i])
+    else:
+        for i in range(STATE_FEATURE_DIM):
+            out[f"f{i}"] = ""
+    return out
 
 
 @dataclass
@@ -25,6 +50,9 @@ class TradeRecord:
     prob_at_entry: float
     prob_at_exit: float
     binance_change: float  # Underlying price change during trade
+    condition_id: str = ""
+    # Snapshot of ``MarketState.to_features()`` at entry decision (24 floats), aligned with RL input.
+    features: Optional[Tuple[float, ...]] = None
 
 
 @dataclass
@@ -109,11 +137,7 @@ class TrainingLogger:
         """Write CSV headers."""
         # Trades
         with open(self.trades_file, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=[
-                'timestamp', 'asset', 'action', 'side', 'entry_price', 'exit_price',
-                'size', 'pnl', 'duration_sec', 'time_remaining', 'prob_at_entry',
-                'prob_at_exit', 'binance_change'
-            ])
+            writer = csv.DictWriter(f, fieldnames=_trade_csv_fieldnames())
             writer.writeheader()
 
         # Updates
@@ -152,9 +176,14 @@ class TrainingLogger:
         prob_at_entry: float,
         prob_at_exit: float,
         binance_change: float = 0.0,
-        condition_id: str = None
+        condition_id: str = None,
+        entry_features: Optional[List[float]] = None,
     ):
         """Log a completed trade."""
+        feat_tuple: Optional[Tuple[float, ...]] = None
+        if entry_features is not None and len(entry_features) == STATE_FEATURE_DIM:
+            feat_tuple = tuple(float(x) for x in entry_features)
+
         record = TradeRecord(
             timestamp=datetime.now().isoformat(),
             asset=asset,
@@ -168,7 +197,9 @@ class TrainingLogger:
             time_remaining=time_remaining,
             prob_at_entry=prob_at_entry,
             prob_at_exit=prob_at_exit,
-            binance_change=binance_change
+            binance_change=binance_change,
+            condition_id=condition_id or "",
+            features=feat_tuple,
         )
 
         self.trades.append(record)
@@ -181,8 +212,8 @@ class TrainingLogger:
 
         # Append to CSV
         with open(self.trades_file, 'a', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=list(asdict(record).keys()))
-            writer.writerow(asdict(record))
+            writer = csv.DictWriter(f, fieldnames=_trade_csv_fieldnames())
+            writer.writerow(_trade_row_dict(record))
 
     def log_update(
         self,

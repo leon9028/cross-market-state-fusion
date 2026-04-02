@@ -172,12 +172,12 @@ class RLStrategy(Strategy):
         critic_hidden_size: int = 192,  # was 128; critic needs more capacity (EV stuck ~0)
         history_len: int = 5,
         temporal_dim: int = 32,
-        lr_actor: float = 4e-5,     # 3e-5 still yields very low clip_fraction in long runs; push policy updates slightly harder
+        lr_actor: float = 4.5e-5,   # 4e-5 helped clip_fraction; approx_kl still ~0.002 vs target_kl 0.02 — small bump
         lr_critic: float = 2.5e-4,  # bump from 2e-4; EV stuck at ~0.007 over 328 updates — critic needs faster learning
         gamma: float = 0.80,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.20,  # widen trust region; 0.15 under-updates with low-variance advantages
-        entropy_coef: float = 0.09,  # short early runs (few updates) still bleed; nudge exploration vs spread penalty
+        entropy_coef: float = 0.10,  # nudge exploration; $/t still ~-10.5 after 314 upd
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         buffer_size: int = 1024,    # 2048 too stale for fast-changing 15m markets; 1024 balances freshness vs noise

@@ -65,6 +65,8 @@ class Position:
     entry_prob: float = 0.0
     time_remaining_at_entry: float = 0.0
     shares: float = 0.0  # Filled shares from User Channel (live); SELL order uses this
+    # ``MarketState.to_features()`` at entry (same 24-dim vector as RL); set on open, used when logging closes.
+    entry_features: Optional[List[float]] = None
 
 
 class TradingEngine:
@@ -374,6 +376,7 @@ class TradingEngine:
                     "size_label": size_label,
                     "emit_label": f"BUY_{size_label}",
                     "order_price": order_price,
+                    "entry_features": state.to_features().tolist(),
                 }
                 asyncio.get_running_loop().create_task(self._delayed_apply_paper_open(cid))
                 print(f"    [Training] OPEN UP {pos.asset} ({size_label}) {shares} shares @ {order_price:.3f} (applying in 5s)")
@@ -398,6 +401,7 @@ class TradingEngine:
                     "size_label": size_label,
                     "emit_label": f"SELL_{size_label}",
                     "order_price": order_price,
+                    "entry_features": state.to_features().tolist(),
                 }
                 asyncio.get_running_loop().create_task(self._delayed_apply_paper_open(cid))
                 print(f"    [Training] OPEN DOWN {pos.asset} ({size_label}) {shares} shares @ {order_price:.3f} (applying in 5s)")
@@ -419,6 +423,7 @@ class TradingEngine:
         pos.entry_time = payload["entry_time"]
         pos.entry_prob = payload["entry_prob"]
         pos.time_remaining_at_entry = payload["time_remaining_at_entry"]
+        pos.entry_features = payload.get("entry_features")
         self.entry_spread_pcts.append(payload["spread_pct"])
         size_label = payload["size_label"]
         order_price = payload["order_price"]
@@ -509,7 +514,8 @@ class TradingEngine:
                 prob_at_entry=pos.entry_prob,
                 prob_at_exit=price,
                 binance_change=binance_change,
-                condition_id=cid
+                condition_id=cid,
+                entry_features=pos.entry_features,
             )
 
     def _compute_step_reward(self, cid: str, state: 'MarketState', action: 'Action', pos: 'Position',
@@ -592,6 +598,9 @@ class TradingEngine:
                         return
                 else:
                     if actual_shares > 0:
+                        st = self.states.get(cid)
+                        if st is not None:
+                            pos.entry_features = st.to_features().tolist()
                         pos.shares = actual_shares
                         pos.size = pos.shares * fill.price
                         pos.side = fill.outcome
