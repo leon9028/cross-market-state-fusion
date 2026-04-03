@@ -104,6 +104,13 @@ def _predict_ridge(X, w):
     return Xb @ w
 
 
+def _integrate_trapz(y, x):
+    # NumPy 2.0+: trapz removed; use trapezoid. Older: trapz.
+    if hasattr(np, "trapezoid"):
+        return float(np.trapezoid(y, x))
+    return float(np.trapz(y, x))
+
+
 def _roc_auc_trapezoid(y_true, y_score):
     y_true = np.asarray(y_true, dtype=np.float64)
     y_score = np.asarray(y_score, dtype=np.float64)
@@ -117,7 +124,7 @@ def _roc_auc_trapezoid(y_true, y_score):
     fps = np.cumsum(1.0 - y_sorted)
     tpr = np.concatenate([[0], tps / n_pos])
     fpr = np.concatenate([[0], fps / n_neg])
-    return float(np.trapz(tpr, fpr))
+    return _integrate_trapz(tpr, fpr)
 
 
 def _r2(y_true, y_pred):
