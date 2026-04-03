@@ -114,7 +114,7 @@ class RLStrategy(Strategy):
         temporal_dim: int = 32,
         lr_actor: float = 4.5e-5,
         lr_critic: float = 2.5e-4,
-        gamma: float = 0.80,
+        gamma: float = 0.84,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.20,
         entropy_coef: float = 0.10,
@@ -172,6 +172,7 @@ class RLStrategy(Strategy):
         self._last_log_prob = 0.0
         self._last_value = 0.0
         self._last_temporal_state: Optional[np.ndarray] = None
+        self._last_action_probs: Optional[np.ndarray] = None
 
     def _get_temporal_state(self, asset: str, current_features: np.ndarray) -> np.ndarray:
         if asset not in self._state_history:
@@ -199,6 +200,7 @@ class RLStrategy(Strategy):
             value = self.critic(features_t, temporal_t)
 
         probs_np = probs.cpu().numpy().flatten()
+        self._last_action_probs = probs_np.astype(np.float32).copy()
         value_np = float(value.cpu().item())
 
         if self.training:

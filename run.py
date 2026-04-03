@@ -15,6 +15,8 @@ Usage:
 import asyncio
 import argparse
 import copy
+import math
+import os
 import sys
 import threading
 import time
@@ -147,6 +149,16 @@ class TradingEngine:
         # 30→18→15 still produced high HOLD (~70-85%) in medium runs, so dial down further.
         self.TRADE_COST_COEF = 12.0
 
+        # RL: skip new opens when π(chosen action) is below this (flat only; closes never gated).
+        # Set RL_MIN_OPEN_PROB=0 to disable. Try 0.36–0.42 if $/trade stays negative.
+        _thr = os.environ.get("RL_MIN_OPEN_PROB", "").strip()
+        if _thr:
+            self.RL_MIN_OPEN_PROB = float(_thr)
+        elif isinstance(strategy, RLStrategy) and strategy.training:
+            self.RL_MIN_OPEN_PROB = 0.34
+        else:
+            self.RL_MIN_OPEN_PROB = 0.0
+
         # Live: track pending orders at market (cid) level until position is verified
         # Prevents any new order for a market while a previous order is being processed
         self._pending_orders: set = set()  # Set of condition_ids with pending orders
@@ -156,6 +168,12 @@ class TradingEngine:
 
         # Logger (for RL training)
         self.logger = get_logger() if isinstance(strategy, RLStrategy) else None
+
+        if isinstance(strategy, RLStrategy) and self.RL_MIN_OPEN_PROB > 0:
+            print(
+                f"  [RL] Open confidence floor: RL_MIN_OPEN_PROB={self.RL_MIN_OPEN_PROB} "
+                f"(optional override: env RL_MIN_OPEN_PROB=0 to disable)"
+            )
 
     def refresh_markets(self):
         """Find active 15-min markets."""
@@ -533,7 +551,8 @@ class TradingEngine:
         - HOLD 虧損倉: 價格對你不利 → U_t 更負 → reward_t < 0，持續被懲罰
         - 平倉實現獲利: U_t 從正值跳回 0，R_t 累加 → B_t 從 alpha*U 跳到 1*U，多出 (1-alpha)*U 的正 spike
         """
-        alpha = 0.5
+        # Higher alpha => reward tracks mark-to-market more tightly; improves credit to closes vs pure delta-noise.
+        alpha = 0.62
 
         realized = self._realized_pnl.get(cid, 0.0)
         unrealized = state.position_pnl
@@ -851,6 +870,23 @@ class TradingEngine:
                 if not is_pending:
                     # Get action from strategy
                     action = self.strategy.act(state)
+                    # Fewer, higher-conviction opens (optional floor). Keeps pi/log_prob consistent if we force HOLD.
+                    if (
+                        isinstance(self.strategy, RLStrategy)
+                        and self.RL_MIN_OPEN_PROB > 0
+                        and action != Action.HOLD
+                    ):
+                        has_pos = pos and (pos.size > 0 or pos.shares > 0)
+                        if not has_pos:
+                            p = getattr(self.strategy, "_last_action_probs", None)
+                            if (
+                                p is not None
+                                and int(action.value) < len(p)
+                                and float(p[int(action.value)]) < self.RL_MIN_OPEN_PROB
+                            ):
+                                ph = float(p[int(Action.HOLD.value)])
+                                self.strategy._last_log_prob = math.log(max(ph, 1e-8))
+                                action = Action.HOLD
                     self.action_counts[action.value] += 1
                 else:
                     action = Action.HOLD

@@ -174,7 +174,7 @@ class RLStrategy(Strategy):
         temporal_dim: int = 32,
         lr_actor: float = 4.5e-5,   # 4e-5 helped clip_fraction; approx_kl still ~0.002 vs target_kl 0.02 — small bump
         lr_critic: float = 2.5e-4,  # bump from 2e-4; EV stuck at ~0.007 over 328 updates — critic needs faster learning
-        gamma: float = 0.80,
+        gamma: float = 0.84,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.20,  # widen trust region; 0.15 under-updates with low-variance advantages
         entropy_coef: float = 0.10,  # nudge exploration; $/t still ~-10.5 after 314 upd
@@ -232,6 +232,7 @@ class RLStrategy(Strategy):
         self._last_log_prob = 0.0
         self._last_value = 0.0
         self._last_temporal_state: Optional[np.ndarray] = None
+        self._last_action_probs: Optional[np.ndarray] = None
 
         # Eval networks on init
         mx.eval(self.actor.parameters(), self.critic.parameters())
@@ -278,6 +279,7 @@ class RLStrategy(Strategy):
         mx.eval(probs, value)
 
         probs_np = np.array(probs[0])
+        self._last_action_probs = probs_np.astype(np.float32).copy()
         value_np = float(np.array(value[0, 0]))
 
         if self.training:
