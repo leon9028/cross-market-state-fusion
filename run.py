@@ -11,6 +11,10 @@ Usage:
     python run.py rl --train          # Train RL strategy
     python run.py rl --train --dashboard  # Train with web dashboard
     python run.py rl --live       # Run with real orders (requires .env CLOB creds)
+
+    RL training (optional env):
+        RL_MIN_OPEN_PROB=0.30       # min π(open action) to allow a new position; omit or 0 = off
+        RL_OPEN_GATE_MIN_UPDATES=400 # if set, floor only applies after this many PPO updates (early exploration)
 """
 import asyncio
 import argparse
@@ -149,15 +153,13 @@ class TradingEngine:
         # 30→18→15 still produced high HOLD (~70-85%) in medium runs, so dial down further.
         self.TRADE_COST_COEF = 12.0
 
-        # RL: skip new opens when π(chosen action) is below this (flat only; closes never gated).
-        # Set RL_MIN_OPEN_PROB=0 to disable. Try 0.36–0.42 if $/trade stays negative.
+        # RL: optional open confidence floor (flat only; closes never gated).
+        # Default off: a fixed training default (~0.34) caused late-run ~100% HOLD + clip_fraction 0.
         _thr = os.environ.get("RL_MIN_OPEN_PROB", "").strip()
-        if _thr:
-            self.RL_MIN_OPEN_PROB = float(_thr)
-        elif isinstance(strategy, RLStrategy) and strategy.training:
-            self.RL_MIN_OPEN_PROB = 0.34
-        else:
-            self.RL_MIN_OPEN_PROB = 0.0
+        self.RL_MIN_OPEN_PROB = float(_thr) if _thr else 0.0
+        _gmin = os.environ.get("RL_OPEN_GATE_MIN_UPDATES", "").strip()
+        self.RL_OPEN_GATE_MIN_UPDATES = int(_gmin) if _gmin else None  # None => active from start if prob > 0
+
 
         # Live: track pending orders at market (cid) level until position is verified
         # Prevents any new order for a market while a previous order is being processed
@@ -170,9 +172,14 @@ class TradingEngine:
         self.logger = get_logger() if isinstance(strategy, RLStrategy) else None
 
         if isinstance(strategy, RLStrategy) and self.RL_MIN_OPEN_PROB > 0:
+            when = (
+                f"after PPO updates >= {self.RL_OPEN_GATE_MIN_UPDATES}"
+                if self.RL_OPEN_GATE_MIN_UPDATES is not None
+                else "from start"
+            )
             print(
-                f"  [RL] Open confidence floor: RL_MIN_OPEN_PROB={self.RL_MIN_OPEN_PROB} "
-                f"(optional override: env RL_MIN_OPEN_PROB=0 to disable)"
+                f"  [RL] Open floor: π(open) >= {self.RL_MIN_OPEN_PROB} ({when}). "
+                f"Unset RL_MIN_OPEN_PROB or set 0 to disable."
             )
 
     def refresh_markets(self):
@@ -580,6 +587,15 @@ class TradingEngine:
         self._baseline_pnl[cid] = baseline
         return reward
 
+    def _rl_open_gate_active(self) -> bool:
+        """True if we should apply RL_MIN_OPEN_PROB to new opens (see RL_OPEN_GATE_MIN_UPDATES)."""
+        if self.RL_MIN_OPEN_PROB <= 0:
+            return False
+        if self.RL_OPEN_GATE_MIN_UPDATES is None:
+            return True
+        n = self.logger.update_count if self.logger else 0
+        return n >= self.RL_OPEN_GATE_MIN_UPDATES
+
     def _resolve_condition_id(self, raw_cid: str) -> Optional[str]:
         """Resolve fill condition_id to engine's position key (0x or no-0x)."""
         if not raw_cid:
@@ -873,7 +889,7 @@ class TradingEngine:
                     # Fewer, higher-conviction opens (optional floor). Keeps pi/log_prob consistent if we force HOLD.
                     if (
                         isinstance(self.strategy, RLStrategy)
-                        and self.RL_MIN_OPEN_PROB > 0
+                        and self._rl_open_gate_active()
                         and action != Action.HOLD
                     ):
                         has_pos = pos and (pos.size > 0 or pos.shares > 0)

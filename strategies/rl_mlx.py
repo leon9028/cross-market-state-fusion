@@ -86,7 +86,7 @@ class Actor(nn.Module):
         self.ln2 = nn.LayerNorm(hidden_size)
         self.fc3 = nn.Linear(hidden_size, output_dim)
 
-    ACTION_FLOOR = 0.05
+    ACTION_FLOOR = 0.07  # keep min mass on BUY/SELL; 0.05 + open gate led to near-total HOLD collapse
 
     def __call__(self, current_state: mx.array, temporal_state: mx.array) -> mx.array:
         """Forward pass. Returns action probabilities.
@@ -177,7 +177,7 @@ class RLStrategy(Strategy):
         gamma: float = 0.84,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.20,  # widen trust region; 0.15 under-updates with low-variance advantages
-        entropy_coef: float = 0.10,  # nudge exploration; $/t still ~-10.5 after 314 upd
+        entropy_coef: float = 0.12,  # higher after long runs collapsed to ~100% HOLD + clip_fraction 0
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         buffer_size: int = 1024,    # 2048 too stale for fast-changing 15m markets; 1024 balances freshness vs noise

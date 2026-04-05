@@ -65,7 +65,7 @@ class Actor(nn.Module):
         self.ln2 = nn.LayerNorm(hidden_size)
         self.fc3 = nn.Linear(hidden_size, output_dim)
 
-    ACTION_FLOOR = 0.05
+    ACTION_FLOOR = 0.07  # keep min mass on BUY/SELL; 0.05 + open gate led to near-total HOLD collapse
 
     def forward(self, current_state: torch.Tensor, temporal_state: torch.Tensor) -> torch.Tensor:
         temporal_features = self.temporal_encoder(temporal_state)
@@ -117,7 +117,7 @@ class RLStrategy(Strategy):
         gamma: float = 0.84,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.20,
-        entropy_coef: float = 0.10,
+        entropy_coef: float = 0.12,
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         buffer_size: int = 1024,
