@@ -159,6 +159,15 @@ class TradingEngine:
         self.RL_MIN_OPEN_PROB = float(_thr) if _thr else 0.0
         _gmin = os.environ.get("RL_OPEN_GATE_MIN_UPDATES", "").strip()
         self.RL_OPEN_GATE_MIN_UPDATES = int(_gmin) if _gmin else None  # None => active from start if prob > 0
+        # RL: hard open quality filters (flat only; closes are never blocked).
+        # Defaults tuned from recent runs: $/trade still negative while trading very frequently.
+        _edge = os.environ.get("RL_MIN_OPEN_EDGE", "").strip()
+        self.RL_MIN_OPEN_EDGE = float(_edge) if _edge else (0.05 if isinstance(strategy, RLStrategy) and strategy.training else 0.0)
+        _max_spread = os.environ.get("RL_MAX_OPEN_SPREAD_PCT", "").strip()
+        self.RL_MAX_OPEN_SPREAD_PCT = float(_max_spread) if _max_spread else (0.020 if isinstance(strategy, RLStrategy) and strategy.training else 1.0)
+        # Debug counters for quality filter impact
+        self._open_blocked_low_edge = 0
+        self._open_blocked_wide_spread = 0
 
 
         # Live: track pending orders at market (cid) level until position is verified
@@ -180,6 +189,11 @@ class TradingEngine:
             print(
                 f"  [RL] Open floor: π(open) >= {self.RL_MIN_OPEN_PROB} ({when}). "
                 f"Unset RL_MIN_OPEN_PROB or set 0 to disable."
+            )
+        if isinstance(strategy, RLStrategy) and strategy.training:
+            print(
+                f"  [RL] Open quality filter: |prob-0.5|>={self.RL_MIN_OPEN_EDGE:.3f}, "
+                f"spread_pct<={self.RL_MAX_OPEN_SPREAD_PCT:.3f} (env: RL_MIN_OPEN_EDGE / RL_MAX_OPEN_SPREAD_PCT)"
             )
 
     def refresh_markets(self):
@@ -596,6 +610,29 @@ class TradingEngine:
         n = self.logger.update_count if self.logger else 0
         return n >= self.RL_OPEN_GATE_MIN_UPDATES
 
+    def _rl_open_allowed_by_quality(self, state: MarketState, action: Action) -> bool:
+        """Filter low-quality new opens by edge and relative spread. Closes are not evaluated here."""
+        if action == Action.HOLD:
+            return True
+
+        # 1) Edge from 0.5 mid (flat only filter)
+        edge = abs(state.prob - 0.5)
+        if edge < self.RL_MIN_OPEN_EDGE:
+            self._open_blocked_low_edge += 1
+            return False
+
+        # 2) Relative spread at the token we would open
+        if action.is_buy:
+            ref_price = max(0.01, state.prob)
+        else:
+            ref_price = max(0.01, 1.0 - state.prob)
+        spread_pct = (state.spread / ref_price) if state.spread is not None else 0.0
+        spread_pct = max(0.0, min(0.20, spread_pct))
+        if spread_pct > self.RL_MAX_OPEN_SPREAD_PCT:
+            self._open_blocked_wide_spread += 1
+            return False
+        return True
+
     def _resolve_condition_id(self, raw_cid: str) -> Optional[str]:
         """Resolve fill condition_id to engine's position key (0x or no-0x)."""
         if not raw_cid:
@@ -903,6 +940,15 @@ class TradingEngine:
                                 ph = float(p[int(Action.HOLD.value)])
                                 self.strategy._last_log_prob = math.log(max(ph, 1e-8))
                                 action = Action.HOLD
+                    # Quality filter for NEW opens only; never block closes/risk reduction.
+                    if isinstance(self.strategy, RLStrategy) and action != Action.HOLD:
+                        has_pos = pos and (pos.size > 0 or pos.shares > 0)
+                        if not has_pos and not self._rl_open_allowed_by_quality(state, action):
+                            p = getattr(self.strategy, "_last_action_probs", None)
+                            if p is not None and int(Action.HOLD.value) < len(p):
+                                ph = float(p[int(Action.HOLD.value)])
+                                self.strategy._last_log_prob = math.log(max(ph, 1e-8))
+                            action = Action.HOLD
                     self.action_counts[action.value] += 1
                 else:
                     action = Action.HOLD
@@ -1041,6 +1087,11 @@ class TradingEngine:
             f"  PnL: ${self.total_pnl:+.2f} | Trades: {self.trade_count} | "
             f"Win: {win_rate:.0f}% | PPO updates: {ppo_updates}"
         )
+        if isinstance(self.strategy, RLStrategy) and self.strategy.training:
+            print(
+                f"  Open blocks: low_edge={self._open_blocked_low_edge} "
+                f"wide_spread={self._open_blocked_wide_spread}"
+            )
 
         # Prepare dashboard data
         dashboard_markets = {}
